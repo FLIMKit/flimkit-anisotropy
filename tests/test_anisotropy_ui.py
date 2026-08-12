@@ -19,19 +19,30 @@ def _tk_root_or_skip():
     return root
 
 
-def test_menu_handler_opens_anisotropy_tool():
+def test_plugin_registers_a_tools_menu_entry():
+    from flimkit import plugins
+    import flimkit_anisotropy
+    found = plugins.get_tool('anisotropy')
+    assert found is not None
+    assert found.label == 'Time-Resolved Anisotropy...'
+    assert found.menu_path == ('Tools',)
+
+
+def test_plugin_entry_opens_the_tool_with_the_app_root():
+    from flimkit import plugins
+    import flimkit_anisotropy
     builder = _UIBuilder.__new__(_UIBuilder)
     builder.root = object()
 
-    with patch('flimkit.UI.anisotropy_tool.show_anisotropy_tool') as show:
-        builder._menu_anisotropy()
+    with patch('flimkit_anisotropy.tool.show_anisotropy_tool') as show:
+        plugins.get_tool('anisotropy').callback(builder)
 
     show.assert_called_once_with(builder.root)
 
 
 def test_anisotropy_dialog_exposes_explicit_file_roles():
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     root = _tk_root_or_skip()
     try:
@@ -58,12 +69,12 @@ def test_anisotropy_dialog_exposes_explicit_file_roles():
 
 
 def test_anisotropy_irf_browser_lists_supported_exports():
-    from flimkit.UI.anisotropy_tool import AnisotropyTool
+    from flimkit_anisotropy.tool import AnisotropyTool
 
     tool = AnisotropyTool.__new__(AnisotropyTool)
     variable = type('Variable', (), {'set': lambda self, value: setattr(self, 'value', value)})()
     with patch(
-            'flimkit.UI.anisotropy_tool.filedialog.askopenfilename',
+            'flimkit_anisotropy.tool.filedialog.askopenfilename',
             return_value='/tmp/parallel.csv') as browse:
         tool._browse(variable, file_kind='irf')
 
@@ -78,7 +89,7 @@ def test_anisotropy_irf_browser_lists_supported_exports():
 
 def test_anisotropy_dialog_offers_direct_and_preferred_modes():
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     root = _tk_root_or_skip()
     try:
@@ -102,12 +113,12 @@ def test_anisotropy_dialog_offers_direct_and_preferred_modes():
 
 
 def test_method_info_states_global_fit_requirements():
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     root = _tk_root_or_skip()
     try:
         dialog = show_anisotropy_tool(root)
-        with patch('flimkit.UI.anisotropy_tool.messagebox.showinfo') as showinfo:
+        with patch('flimkit_anisotropy.tool.messagebox.showinfo') as showinfo:
             dialog._show_method_info()
         message = showinfo.call_args.args[1]
         assert 'known fluorescence lifetime' in message
@@ -119,7 +130,7 @@ def test_method_info_states_global_fit_requirements():
 
 
 def test_preferred_mode_requires_two_irf_files(tmp_path):
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     parallel = tmp_path / 'parallel.ptu'
     perpendicular = tmp_path / 'perpendicular.ptu'
@@ -139,7 +150,7 @@ def test_preferred_mode_requires_two_irf_files(tmp_path):
 
 
 def test_preferred_mode_requires_positive_known_lifetime(tmp_path):
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     paths = [tmp_path / name for name in (
         'parallel.ptu', 'perpendicular.ptu', 'parallel.csv', 'perpendicular.csv')]
@@ -163,7 +174,7 @@ def test_preferred_mode_requires_positive_known_lifetime(tmp_path):
 
 def test_anisotropy_dialog_rejects_nonfinite_exposure(tmp_path):
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     parallel = tmp_path / 'parallel.ptu'
     perpendicular = tmp_path / 'perpendicular.ptu'
@@ -184,7 +195,7 @@ def test_anisotropy_dialog_rejects_nonfinite_exposure(tmp_path):
 
 def test_anisotropy_dialog_rejects_nonfinite_photon_threshold(tmp_path):
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     parallel = tmp_path / 'parallel.ptu'
     perpendicular = tmp_path / 'perpendicular.ptu'
@@ -205,7 +216,7 @@ def test_anisotropy_dialog_rejects_nonfinite_photon_threshold(tmp_path):
 
 def test_anisotropy_dialog_rejects_nonfinite_analysis_time(tmp_path):
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     parallel = tmp_path / 'parallel.ptu'
     perpendicular = tmp_path / 'perpendicular.ptu'
@@ -226,7 +237,7 @@ def test_anisotropy_dialog_rejects_nonfinite_analysis_time(tmp_path):
 
 def test_anisotropy_dialog_rejects_negative_photon_channel(tmp_path):
     import tkinter as tk
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     parallel = tmp_path / 'parallel.ptu'
     perpendicular = tmp_path / 'perpendicular.ptu'
@@ -246,20 +257,20 @@ def test_anisotropy_dialog_rejects_negative_photon_channel(tmp_path):
 
 
 def test_worker_returns_result_through_queue_without_touching_tk():
-    from flimkit.UI.anisotropy_tool import AnisotropyTool
+    from flimkit_anisotropy.tool import AnisotropyTool
 
     tool = AnisotropyTool.__new__(AnisotropyTool)
     tool._result_queue = Queue()
     expected = (object(), 7)
 
-    with patch('flimkit.UI.anisotropy_tool.run_analysis', return_value=expected):
+    with patch('flimkit_anisotropy.tool.run_analysis', return_value=expected):
         tool._analysis_worker({})
 
     assert tool._result_queue.get_nowait() == ('success', *expected)
 
 
 def test_closed_dialog_does_not_reschedule_worker_poll():
-    from flimkit.UI.anisotropy_tool import AnisotropyTool
+    from flimkit_anisotropy.tool import AnisotropyTool
 
     tool = AnisotropyTool.__new__(AnisotropyTool)
     tool._closed = True
@@ -276,7 +287,7 @@ def test_redrawing_result_replaces_existing_colorbar():
 
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     root = _tk_root_or_skip()
     try:
@@ -318,7 +329,7 @@ def test_global_fit_mode_draws_polarized_models_and_residuals():
     import matplotlib as mpl
     import numpy as np
     import warnings
-    from flimkit.UI.anisotropy_tool import show_anisotropy_tool
+    from flimkit_anisotropy.tool import show_anisotropy_tool
 
     rc_overrides = {
         'text.color': 'white',
@@ -406,7 +417,7 @@ def test_global_fit_mode_draws_polarized_models_and_residuals():
 def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import run_analysis
+    from flimkit_anisotropy.tool import run_analysis
 
     stack = np.ones((2, 2, 16), dtype=float)
 
@@ -454,11 +465,11 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     perpendicular_irf = np.eye(1, 15, 4).ravel()
 
     with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
-          patch('flimkit.FLIM.anisotropy.analyze_anisotropy',
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
                 return_value=expected),
-          patch('flimkit.UI.anisotropy_tool.load_irf_curve',
+          patch('flimkit_anisotropy.tool.load_irf_curve',
                 side_effect=[parallel_irf, perpendicular_irf]),
-          patch('flimkit.FLIM.anisotropy.fit_polarized_decays',
+          patch('flimkit_anisotropy.anisotropy.fit_polarized_decays',
                 return_value=preferred_fit) as fit):
         result, _ = run_analysis(settings)
 
@@ -486,7 +497,7 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
 def test_run_analysis_records_photon_thresholds():
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import run_analysis
+    from flimkit_anisotropy.tool import run_analysis
 
     stack = np.ones((2, 2, 4), dtype=float)
 
@@ -523,7 +534,7 @@ def test_run_analysis_records_photon_thresholds():
     }
 
     with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
-          patch('flimkit.FLIM.anisotropy.analyze_anisotropy',
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
                 return_value=expected)):
         result, _ = run_analysis(settings)
 
@@ -534,7 +545,7 @@ def test_run_analysis_records_photon_thresholds():
 def test_run_analysis_uses_g_and_exposure_normalized_peak():
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import run_analysis
+    from flimkit_anisotropy.tool import run_analysis
 
     stacks = {
         'parallel.ptu': np.array([[[100.0, 0.0]]]),
@@ -575,7 +586,7 @@ def test_run_analysis_uses_g_and_exposure_normalized_peak():
     }
 
     with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
-          patch('flimkit.FLIM.anisotropy.analyze_anisotropy',
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
                 return_value=expected)):
         _, peak_bin = run_analysis(settings)
 
@@ -586,7 +597,7 @@ def test_global_fit_csv_includes_models_residuals_and_parameters(tmp_path):
     import csv
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import AnisotropyTool
+    from flimkit_anisotropy.tool import AnisotropyTool
 
     fit = SimpleNamespace(
         parallel_model=np.array([9.0]),
@@ -622,7 +633,7 @@ def test_global_fit_csv_includes_models_residuals_and_parameters(tmp_path):
     )
     path = tmp_path / 'global.csv'
 
-    with patch('flimkit.UI.anisotropy_tool.filedialog.asksaveasfilename',
+    with patch('flimkit_anisotropy.tool.filedialog.asksaveasfilename',
                return_value=str(path)):
         tool._save_csv()
 
@@ -646,7 +657,7 @@ def test_csv_export_includes_relative_time_and_provenance(tmp_path):
     import csv
     from types import SimpleNamespace
     import numpy as np
-    from flimkit.UI.anisotropy_tool import AnisotropyTool
+    from flimkit_anisotropy.tool import AnisotropyTool
 
     tool = AnisotropyTool.__new__(AnisotropyTool)
     tool.peak_bin = 1
@@ -677,7 +688,7 @@ def test_csv_export_includes_relative_time_and_provenance(tmp_path):
     )
     path = tmp_path / 'decay.csv'
 
-    with patch('flimkit.UI.anisotropy_tool.filedialog.asksaveasfilename',
+    with patch('flimkit_anisotropy.tool.filedialog.asksaveasfilename',
                return_value=str(path)):
         tool._save_csv()
 

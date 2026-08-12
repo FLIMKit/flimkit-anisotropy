@@ -492,7 +492,7 @@ class AnisotropyTool(tk.Toplevel):
             defaultextension='.npz', filetypes=[('NPZ files', '*.npz')])
         if not path:
             return
-        from flimkit.FLIM.anisotropy import save_anisotropy_npz
+        from .anisotropy import save_anisotropy_npz
         self.result.metadata['peak_bin'] = int(self.peak_bin)
         save_anisotropy_npz(self.result, path)
         self.status.set(f'Saved {Path(path).name}')
@@ -594,7 +594,7 @@ def load_irf_curve(path, n_bins, tcspc_res):
 
 
 def run_analysis(settings):
-    from flimkit.FLIM.anisotropy import (
+    from .anisotropy import (
         analyze_anisotropy, estimate_translation, fit_polarized_decays)
     from flimkit.formats.PTU.reader import PTUFile
 

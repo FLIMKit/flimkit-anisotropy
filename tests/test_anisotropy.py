@@ -3,7 +3,7 @@ import pytest
 
 
 def test_polarized_decay_models_follow_lakowicz_channel_equations():
-    from flimkit.FLIM.anisotropy import polarized_decay_models
+    from flimkit_anisotropy.anisotropy import polarized_decay_models
 
     time_ns = np.arange(6, dtype=float)
     delta_irf = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -25,7 +25,7 @@ def test_polarized_decay_models_follow_lakowicz_channel_equations():
 
 
 def test_polarized_decay_models_include_previous_laser_pulses():
-    from flimkit.FLIM.anisotropy import polarized_decay_models
+    from flimkit_anisotropy.anisotropy import polarized_decay_models
 
     time_ns = np.arange(4, dtype=float)
     delta_irf = np.array([1.0, 0.0, 0.0, 0.0])
@@ -52,7 +52,7 @@ def test_polarized_decay_models_include_previous_laser_pulses():
 
 
 def test_polarized_decay_models_reject_mismatched_laser_period():
-    from flimkit.FLIM.anisotropy import polarized_decay_models
+    from flimkit_anisotropy.anisotropy import polarized_decay_models
 
     time_ns = np.arange(8, dtype=float)
     irf = np.eye(1, 8, 0).ravel()
@@ -65,7 +65,7 @@ def test_polarized_decay_models_reject_mismatched_laser_period():
 
 
 def test_polarized_decay_models_apply_common_irf_shift():
-    from flimkit.FLIM.anisotropy import polarized_decay_models
+    from flimkit_anisotropy.anisotropy import polarized_decay_models
 
     time_ns = np.arange(8, dtype=float)
     delta_irf = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -84,7 +84,7 @@ def test_polarized_decay_models_apply_common_irf_shift():
 
 
 def test_global_polarized_fit_recovers_rotation_shift_and_backgrounds():
-    from flimkit.FLIM.anisotropy import (
+    from flimkit_anisotropy.anisotropy import (
         fit_polarized_decays, polarized_decay_models)
 
     time_ns = np.arange(128, dtype=float) * 0.1
@@ -125,7 +125,7 @@ def test_global_polarized_fit_recovers_rotation_shift_and_backgrounds():
 
 def test_global_fit_avoids_unequal_irf_bias_from_divided_anisotropy():
     from scipy.optimize import curve_fit
-    from flimkit.FLIM.anisotropy import (
+    from flimkit_anisotropy.anisotropy import (
         fit_polarized_decays, polarized_decay_models)
 
     time_ns = np.arange(256, dtype=float) * 0.1
@@ -168,7 +168,7 @@ def test_global_fit_avoids_unequal_irf_bias_from_divided_anisotropy():
 
 
 def test_global_polarized_fit_reports_parameters_at_bounds():
-    from flimkit.FLIM.anisotropy import (
+    from flimkit_anisotropy.anisotropy import (
         fit_polarized_decays, polarized_decay_models)
 
     time_ns = np.arange(64, dtype=float) * 0.1
@@ -188,7 +188,7 @@ def test_global_polarized_fit_reports_parameters_at_bounds():
 
 
 def test_calculate_anisotropy_uses_parallel_perpendicular_formula():
-    from flimkit.FLIM.anisotropy import calculate_anisotropy
+    from flimkit_anisotropy.anisotropy import calculate_anisotropy
 
     parallel = np.array([60.0, 30.0])
     perpendicular = np.array([20.0, 10.0])
@@ -199,7 +199,7 @@ def test_calculate_anisotropy_uses_parallel_perpendicular_formula():
 
 
 def test_calculate_anisotropy_applies_g_factor():
-    from flimkit.FLIM.anisotropy import calculate_anisotropy
+    from flimkit_anisotropy.anisotropy import calculate_anisotropy
 
     result = calculate_anisotropy(
         np.array([80.0]), np.array([20.0]), g_factor=2.0)
@@ -208,7 +208,7 @@ def test_calculate_anisotropy_applies_g_factor():
 
 
 def test_calculate_anisotropy_normalizes_exposure():
-    from flimkit.FLIM.anisotropy import calculate_anisotropy
+    from flimkit_anisotropy.anisotropy import calculate_anisotropy
 
     result = calculate_anisotropy(
         np.array([120.0]), np.array([20.0]),
@@ -218,7 +218,7 @@ def test_calculate_anisotropy_normalizes_exposure():
 
 
 def test_calculate_anisotropy_masks_low_denominators():
-    from flimkit.FLIM.anisotropy import calculate_anisotropy
+    from flimkit_anisotropy.anisotropy import calculate_anisotropy
 
     result = calculate_anisotropy(
         np.array([40.0, 400.0]), np.array([20.0, 100.0]),
@@ -229,7 +229,7 @@ def test_calculate_anisotropy_masks_low_denominators():
 
 
 def test_spatial_window_sum_uses_overlapping_valid_windows():
-    from flimkit.FLIM.anisotropy import spatial_window_sum
+    from flimkit_anisotropy.anisotropy import spatial_window_sum
 
     cube = np.arange(16, dtype=float).reshape(4, 4, 1)
 
@@ -241,7 +241,7 @@ def test_spatial_window_sum_uses_overlapping_valid_windows():
 
 
 def test_subtract_background_uses_per_decay_prepeak_median():
-    from flimkit.FLIM.anisotropy import subtract_background
+    from flimkit_anisotropy.anisotropy import subtract_background
 
     data = np.array([[2.0, 2.0, 6.0, 10.0],
                      [1.0, 3.0, 7.0, 11.0]])
@@ -254,7 +254,7 @@ def test_subtract_background_uses_per_decay_prepeak_median():
 
 
 def test_analyze_anisotropy_has_no_global_fit_by_default():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     data = np.ones((1, 1, 3), dtype=float)
     result = analyze_anisotropy(
@@ -265,7 +265,7 @@ def test_analyze_anisotropy_has_no_global_fit_by_default():
 
 
 def test_analyze_anisotropy_returns_decay_and_overlapping_map():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     parallel = np.full((5, 5, 6), 2.0)
     perpendicular = np.full((5, 5, 6), 3.0)
@@ -289,7 +289,7 @@ def test_analyze_anisotropy_returns_decay_and_overlapping_map():
 
 def test_estimate_translation_finds_shift_to_align_moving_image():
     from scipy.ndimage import shift
-    from flimkit.FLIM.anisotropy import estimate_translation
+    from flimkit_anisotropy.anisotropy import estimate_translation
 
     y, x = np.mgrid[:64, :64]
     reference = np.exp(-((y - 24.0) ** 2 + (x - 35.0) ** 2) / 40.0)
@@ -302,7 +302,7 @@ def test_estimate_translation_finds_shift_to_align_moving_image():
 
 
 def test_estimate_translation_rejects_featureless_images():
-    from flimkit.FLIM.anisotropy import estimate_translation
+    from flimkit_anisotropy.anisotropy import estimate_translation
 
     image = np.ones((16, 16), dtype=float)
 
@@ -312,7 +312,7 @@ def test_estimate_translation_rejects_featureless_images():
 
 def test_estimate_translation_rejects_shift_at_search_boundary():
     from scipy.ndimage import shift
-    from flimkit.FLIM.anisotropy import estimate_translation
+    from flimkit_anisotropy.anisotropy import estimate_translation
 
     y, x = np.mgrid[:64, :64]
     reference = np.exp(-((y - 30.0) ** 2 + (x - 30.0) ** 2) / 30.0)
@@ -323,7 +323,7 @@ def test_estimate_translation_rejects_shift_at_search_boundary():
 
 
 def test_estimate_translation_rejects_low_confidence_alignment():
-    from flimkit.FLIM.anisotropy import estimate_translation
+    from flimkit_anisotropy.anisotropy import estimate_translation
 
     generator = np.random.default_rng(20260808)
     reference = generator.random((64, 64))
@@ -334,7 +334,7 @@ def test_estimate_translation_rejects_low_confidence_alignment():
 
 
 def test_apply_translation_moves_only_spatial_axes():
-    from flimkit.FLIM.anisotropy import apply_translation
+    from flimkit_anisotropy.anisotropy import apply_translation
 
     cube = np.zeros((5, 5, 2), dtype=float)
     cube[2, 1] = [1.0, 2.0]
@@ -346,7 +346,7 @@ def test_apply_translation_moves_only_spatial_axes():
 
 
 def test_analyze_anisotropy_applies_perpendicular_registration_shift():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     parallel = np.ones((5, 5, 4), dtype=float)
     perpendicular = np.ones((5, 5, 4), dtype=float)
@@ -363,7 +363,7 @@ def test_analyze_anisotropy_applies_perpendicular_registration_shift():
 
 
 def test_registration_masks_windows_without_full_perpendicular_support():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     parallel = np.ones((4, 4, 3), dtype=float)
     perpendicular = np.ones((4, 4, 3), dtype=float)
@@ -381,7 +381,7 @@ def test_registration_masks_windows_without_full_perpendicular_support():
 
 
 def test_analyze_ptu_pair_uses_reader_contract_and_explicit_orientation():
-    from flimkit.FLIM.anisotropy import analyze_ptu_pair
+    from flimkit_anisotropy.anisotropy import analyze_ptu_pair
 
     parallel = np.full((3, 3, 4), 2.0)
     perpendicular = np.full((3, 3, 4), 3.0)
@@ -425,7 +425,7 @@ def test_analyze_ptu_pair_uses_reader_contract_and_explicit_orientation():
 
 
 def test_analyze_ptu_pair_rejects_invalid_photon_channels():
-    from flimkit.FLIM.anisotropy import analyze_ptu_pair
+    from flimkit_anisotropy.anisotropy import analyze_ptu_pair
 
     with pytest.raises(ValueError, match='non-negative integers'):
         analyze_ptu_pair(
@@ -435,7 +435,7 @@ def test_analyze_ptu_pair_rejects_invalid_photon_channels():
 
 
 def test_analyze_anisotropy_masks_bins_using_observed_counts():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     parallel = np.zeros((1, 1, 4), dtype=float)
     perpendicular = np.zeros((1, 1, 4), dtype=float)
@@ -451,7 +451,7 @@ def test_analyze_anisotropy_masks_bins_using_observed_counts():
 
 
 def test_valid_masks_exclude_nonfinite_anisotropy_values():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     parallel = np.array([[[20.0, 20.0, 10.0]]])
     perpendicular = np.array([[[20.0, 20.0, 10.0]]])
@@ -467,7 +467,7 @@ def test_valid_masks_exclude_nonfinite_anisotropy_values():
 
 
 def test_analyze_anisotropy_rejects_nonfinite_photon_thresholds():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     data = np.ones((1, 1, 3), dtype=float)
 
@@ -478,7 +478,7 @@ def test_analyze_anisotropy_rejects_nonfinite_photon_thresholds():
 
 
 def test_analyze_anisotropy_rejects_scalar_background_selector():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     data = np.ones((1, 1, 3), dtype=float)
 
@@ -488,7 +488,7 @@ def test_analyze_anisotropy_rejects_scalar_background_selector():
 
 
 def test_analyze_anisotropy_rejects_scalar_analysis_selector():
-    from flimkit.FLIM.anisotropy import analyze_anisotropy
+    from flimkit_anisotropy.anisotropy import analyze_anisotropy
 
     data = np.ones((1, 1, 3), dtype=float)
 
@@ -499,7 +499,7 @@ def test_analyze_anisotropy_rejects_scalar_analysis_selector():
 
 
 def test_save_anisotropy_npz_preserves_masks_and_safe_metadata(tmp_path):
-    from flimkit.FLIM.anisotropy import (
+    from flimkit_anisotropy.anisotropy import (
         PolarizedFitResult, analyze_anisotropy, save_anisotropy_npz)
 
     parallel = np.ones((2, 2, 4), dtype=float)

@@ -1,0 +1,40 @@
+[build-system]
+requires = ['setuptools>=68']
+build-backend = 'setuptools.build_meta'
+
+[project]
+name = 'flimkit-anisotropy'
+version = '0.1.0'
+description = 'Time-resolved fluorescence anisotropy analysis for FLIMKit'
+readme = 'README.md'
+requires-python = '>=3.12'
+license = 'MIT'
+license-files = ['LICENSE.md']
+authors = [
+    {name = 'Zhen Yuan'},
+]
+keywords = ['FLIM', 'FLIMKit', 'anisotropy', 'rotational correlation time', 'TCSPC']
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Intended Audience :: Science/Research',
+    'Programming Language :: Python :: 3',
+    'Topic :: Scientific/Engineering :: Bio-Informatics',
+]
+dependencies = [
+    'flimkit>=0.10.0',
+    'numpy',
+    'scipy',
+]
+
+[project.optional-dependencies]
+test = ['pytest']
+
+[project.urls]
+Homepage = 'https://github.com/FLIMKit/flimkit-anisotropy'
+FLIMKit = 'https://github.com/FLIMKit/FLIMKit'
+
+[project.entry-points.'flimkit.plugins']
+anisotropy = 'flimkit_anisotropy'
+
+[tool.setuptools.packages.find]
+include = ['flimkit_anisotropy*']
