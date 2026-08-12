@@ -24,7 +24,14 @@ jobs:
 
       - name: Clone wiki
         run: |
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git wiki
+          remote=https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git
+          if ! git clone "$remote" wiki; then
+            echo 'wiki repository does not exist yet, creating the first page from scratch'
+            mkdir wiki
+            cd wiki
+            git init -b master
+            git remote add origin "$remote"
+          fi
 
       - name: Build pages
         run: |
@@ -41,5 +48,5 @@ jobs:
             echo 'wiki already up to date'
           else
             git commit -m "Sync wiki from ${{ github.sha }}"
-            git push
+            git push origin HEAD
           fi
