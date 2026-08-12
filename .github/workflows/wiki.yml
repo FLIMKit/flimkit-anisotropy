@@ -26,11 +26,10 @@ jobs:
         run: |
           remote=https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git
           if ! git clone "$remote" wiki; then
-            echo 'wiki repository does not exist yet, creating the first page from scratch'
-            mkdir wiki
-            cd wiki
-            git init -b master
-            git remote add origin "$remote"
+            echo 'The wiki has no git repository yet, and GitHub will not create one by push.'
+            echo 'Open the Wiki tab, create any page, save it, then re-run this workflow.'
+            echo 'The page is overwritten on the first sync, so its content does not matter.'
+            exit 1
           fi
 
       - name: Build pages

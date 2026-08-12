@@ -92,3 +92,5 @@ pytest
 `test_global_fit_mode_draws_polarized_models_and_residuals` asserts pixel positions in a matplotlib layout and can fail on a machine whose font metrics differ from the one it was written on.
 
 Documentation lives in `Docs/documentation.md` and is published to the wiki by `.github/workflows/wiki.yml` on push to `main`. Do not edit the wiki pages directly, they are overwritten on the next sync.
+
+The wiki needs one page created by hand before the first sync can run, because GitHub does not give a wiki a git repository until it has a page and will not create one by push. Any content will do, since the sync overwrites it.
