@@ -34,6 +34,10 @@ pytest
 
 `test_global_fit_mode_draws_polarized_models_and_residuals` asserts pixel positions in the matplotlib layout and can fail on a machine whose font metrics differ from the one it was written on.
 
+## Acknowledgements
+
+Zhen Yuan developed the scientific implementation with assistance from OpenAI's GPT-5.6 Sol, operated through Hermes Agent by Nous Research. This assistance was used to translate the equations and methodological ideas described in Lakowicz's textbook into software, and to support the development of tests, the graphical interface, tooltips and documentation. Zhen Yuan directed and reviewed this work and remains responsible for the final implementation and scientific interpretation.
+
 ## Licence
 
 MIT, same as FLIMKit.
