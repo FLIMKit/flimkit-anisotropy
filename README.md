@@ -4,7 +4,7 @@
 
 Time-resolved fluorescence anisotropy analysis, as a [FLIMKit](https://github.com/FLIMKit/FLIMKit) add-on.
 
-Written by Zhen Yuan. The history here is the original commits from [FLIMKit#35](https://github.com/FLIMKit/FLIMKit/pull/35), extracted rather than copied, so authorship is preserved.
+Written by Zhen Yuan Yeo. The history here is the original commits from [FLIMKit#35](https://github.com/FLIMKit/FLIMKit/pull/35), extracted rather than copied, so authorship is preserved.
 
 ## What it does
 

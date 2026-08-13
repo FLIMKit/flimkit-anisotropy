@@ -20,7 +20,7 @@ Fluorescence anisotropy reports how far a fluorophore rotates between absorbing 
 
 This package adds that analysis to FLIMKit as an add-on. It registers a `Tools > Time-Resolved Anisotropy...` entry through the `flimkit.plugins` registry and takes matched sequential parallel and perpendicular PTU acquisitions.
 
-Written by Zhen Yuan. The commit history here is the original from [FLIMKit#35](https://github.com/FLIMKit/FLIMKit/pull/35), extracted rather than copied.
+Written by Zhen Yuan Yeo. The commit history here is the original from [FLIMKit#35](https://github.com/FLIMKit/FLIMKit/pull/35), extracted rather than copied.
 
 ---
 
