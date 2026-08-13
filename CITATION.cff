@@ -13,4 +13,10 @@ authors:
 type: software
 license: MIT
 version: 0.1.0
+date-released: 2026-08-13
+doi: 10.5281/zenodo.21918921
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21918922
+    description: "Archived release v0.1.0"
 repository-code: "https://github.com/FLIMKit/flimkit-anisotropy"
