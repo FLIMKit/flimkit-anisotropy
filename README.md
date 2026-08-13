@@ -38,6 +38,8 @@ pytest
 
 Zhen Yuan developed the scientific implementation with assistance from OpenAI's GPT-5.6 Sol, operated through Hermes Agent by Nous Research. This assistance was used to translate the equations and methodological ideas described in Lakowicz's textbook into software, and to support the development of tests, the graphical interface, tooltips and documentation. Zhen Yuan directed and reviewed this work and remains responsible for the final implementation and scientific interpretation.
 
+Alexander Hunt preserved the original development history, adapted the project to the FLIMKit plugin system, and contributed the package structure, continuous integration, documentation workflow and release automation.
+
 ## Licence
 
 MIT, same as FLIMKit.
