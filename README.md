@@ -1,6 +1,6 @@
 # flimkit-anisotropy
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21918921.svg)](https://doi.org/10.5281/zenodo.21918921)
+[![DOI](https://zenodo.org/badge/1331757585.svg)](https://doi.org/10.5281/zenodo.21918921)
 
 Time-resolved fluorescence anisotropy analysis, as a [FLIMKit](https://github.com/FLIMKit/FLIMKit) add-on.
 
