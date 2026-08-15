@@ -11,7 +11,8 @@ requires-python = '>=3.12'
 license = 'MIT'
 license-files = ['LICENSE.md']
 authors = [
-    {name = 'Zhen Yuan'},
+    {name = 'Zhen Yuan Yeo'},
+    {name = 'Alex Hunt', email = 'alexander.hunt@ed.ac.uk'},
 ]
 keywords = ['FLIM', 'FLIMKit', 'anisotropy', 'rotational correlation time', 'TCSPC']
 classifiers = [
