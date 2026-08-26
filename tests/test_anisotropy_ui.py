@@ -68,6 +68,54 @@ def test_anisotropy_dialog_exposes_explicit_file_roles():
         root.destroy()
 
 
+def test_anisotropy_dialog_can_collapse_and_restore_inputs():
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        root.update_idletasks()
+
+        assert dialog.input_panel.winfo_manager() == 'pack'
+        assert dialog.toggle_inputs_button.cget('text') == 'Hide inputs'
+
+        dialog._toggle_inputs()
+        root.update_idletasks()
+
+        assert dialog.input_panel.winfo_manager() == ''
+        assert dialog.toggle_inputs_button.cget('text') == 'Show inputs'
+
+        dialog._toggle_inputs()
+        root.update_idletasks()
+
+        assert dialog.input_panel.winfo_manager() == 'pack'
+        assert dialog.toggle_inputs_button.cget('text') == 'Hide inputs'
+    finally:
+        root.destroy()
+
+
+def test_successful_analysis_collapses_inputs_to_show_results():
+    from types import SimpleNamespace
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        result = SimpleNamespace(perpendicular_shift=(0.0, 0.0))
+
+        with patch.object(dialog, '_draw_result'):
+            dialog._analysis_finished(result, 0)
+        root.update_idletasks()
+
+        assert dialog.input_panel.winfo_manager() == ''
+        assert dialog.toggle_inputs_button.cget('text') == 'Show inputs'
+        assert 'disabled' not in dialog.calculate_button.state()
+        assert 'disabled' not in dialog.save_npz_button.state()
+        assert 'disabled' not in dialog.save_csv_button.state()
+    finally:
+        root.destroy()
+
+
 def test_anisotropy_irf_browser_lists_supported_exports():
     from flimkit_anisotropy.tool import AnisotropyTool
 
