@@ -24,10 +24,6 @@ class AnisotropyTool(tk.Toplevel):
         self._build_plot()
 
     def _build_controls(self):
-        controls = ttk.Frame(self, padding=10)
-        controls.pack(fill='x')
-        controls.columnconfigure(1, weight=1)
-
         self.parallel_path = tk.StringVar()
         self.perpendicular_path = tk.StringVar()
         self.parallel_irf_path = tk.StringVar()
@@ -50,16 +46,41 @@ class AnisotropyTool(tk.Toplevel):
         self.auto_register = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value='Choose the parallel and perpendicular PTU files.')
 
-        self._file_row(controls, 0, 'Parallel PTU', self.parallel_path)
-        self._file_row(controls, 1, 'Perpendicular PTU', self.perpendicular_path)
-        self._file_row(
-            controls, 2, 'Parallel IRF export', self.parallel_irf_path,
-            file_kind='irf')
-        self._file_row(
-            controls, 3, 'Perpendicular IRF export', self.perpendicular_irf_path,
-            file_kind='irf')
+        self.toolbar = ttk.Frame(self, padding=(10, 8, 10, 4))
+        self.toolbar.pack(fill='x')
+        self.toggle_inputs_button = ttk.Button(
+            self.toolbar, text='Hide inputs', command=self._toggle_inputs)
+        self.toggle_inputs_button.pack(side='left')
+        self.calculate_button = ttk.Button(
+            self.toolbar, text='Calculate', command=self._start_analysis)
+        self.calculate_button.pack(side='left', padx=(6, 0))
+        self.save_npz_button = ttk.Button(
+            self.toolbar, text='Save NPZ...', command=self._save_npz,
+            state='disabled')
+        self.save_npz_button.pack(side='left', padx=(6, 0))
+        self.save_csv_button = ttk.Button(
+            self.toolbar, text='Save CSV...', command=self._save_csv,
+            state='disabled')
+        self.save_csv_button.pack(side='left', padx=(6, 0))
+        ttk.Label(self.toolbar, textvariable=self.status).pack(
+            side='left', padx=12)
 
-        modes = ttk.LabelFrame(controls, text='Analysis method', padding=8)
+        self.input_panel = ttk.Frame(self, padding=(10, 0, 10, 8))
+        self.input_panel.pack(fill='x', after=self.toolbar)
+        self.input_panel.columnconfigure(1, weight=1)
+
+        self._file_row(self.input_panel, 0, 'Parallel PTU', self.parallel_path)
+        self._file_row(
+            self.input_panel, 1, 'Perpendicular PTU', self.perpendicular_path)
+        self._file_row(
+            self.input_panel, 2, 'Parallel IRF export', self.parallel_irf_path,
+            file_kind='irf')
+        self._file_row(
+            self.input_panel, 3, 'Perpendicular IRF export',
+            self.perpendicular_irf_path, file_kind='irf')
+
+        modes = ttk.LabelFrame(
+            self.input_panel, text='Analysis method', padding=8)
         modes.grid(row=4, column=0, columnspan=3, sticky='ew', pady=(8, 0))
         ttk.Radiobutton(
             modes, text='Direct r(t) diagnostic (no IRF)',
@@ -70,7 +91,8 @@ class AnisotropyTool(tk.Toplevel):
         ttk.Button(modes, text='Method info...',
                    command=self._show_method_info).pack(side='left')
 
-        settings = ttk.LabelFrame(controls, text='Analysis settings', padding=8)
+        settings = ttk.LabelFrame(
+            self.input_panel, text='Analysis settings', padding=8)
         settings.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(8, 0))
         fields = [
             ('Known lifetime (ns, global fit)', self.fixed_lifetime_ns),
@@ -102,21 +124,20 @@ class AnisotropyTool(tk.Toplevel):
 
         note = ('File roles are explicit; FLIMKit does not infer them from names. '
                 'G=1 is an assumption unless calibrated independently.')
-        ttk.Label(controls, text=note, foreground='#555555').grid(
+        ttk.Label(self.input_panel, text=note, foreground='#555555').grid(
             row=6, column=0, columnspan=3, sticky='w', pady=(6, 0))
 
-        actions = ttk.Frame(controls)
-        actions.grid(row=7, column=0, columnspan=3, sticky='ew', pady=(8, 0))
-        self.calculate_button = ttk.Button(
-            actions, text='Calculate', command=self._start_analysis)
-        self.calculate_button.pack(side='left')
-        self.save_npz_button = ttk.Button(
-            actions, text='Save NPZ...', command=self._save_npz, state='disabled')
-        self.save_npz_button.pack(side='left', padx=(6, 0))
-        self.save_csv_button = ttk.Button(
-            actions, text='Save CSV...', command=self._save_csv, state='disabled')
-        self.save_csv_button.pack(side='left', padx=(6, 0))
-        ttk.Label(actions, textvariable=self.status).pack(side='left', padx=12)
+    def _toggle_inputs(self):
+        self._set_inputs_visible(not bool(self.input_panel.winfo_manager()))
+
+    def _set_inputs_visible(self, visible):
+        if visible:
+            if not self.input_panel.winfo_manager():
+                self.input_panel.pack(fill='x', after=self.toolbar)
+            self.toggle_inputs_button.configure(text='Hide inputs')
+        else:
+            self.input_panel.pack_forget()
+            self.toggle_inputs_button.configure(text='Show inputs')
 
     def _file_row(self, parent, row, label, variable, file_kind='ptu'):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', pady=2)
@@ -353,6 +374,7 @@ class AnisotropyTool(tk.Toplevel):
         shift_y, shift_x = result.perpendicular_shift
         self.status.set(
             f'Done. Perpendicular shift: ({shift_y:.2f}, {shift_x:.2f}) px')
+        self._set_inputs_visible(False)
         self._draw_result()
 
     def _draw_result(self):
