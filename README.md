@@ -11,7 +11,9 @@ Written by Zhen Yuan Yeo. The history here is the original commits from [FLIMKit
 The tool takes matched sequential parallel and perpendicular PTU acquisitions and offers two methods:
 
 - A direct r(t) diagnostic, giving background-corrected anisotropy traces and registered, neighbourhood-pooled maps. It is a diagnostic only: division and IRF convolution do not commute, so it is not used to estimate rotational correlation times.
-- A global polarized-decay fit, following the channel equations and direct global analysis in Lakowicz, chapter 11, section 11.2.2. It jointly models the raw parallel and perpendicular decays with separate measured IRFs, a fixed known fluorescence lifetime, fixed G and exposure factors, periodic excitation, one rotational correlation time, a common IRF timing shift, and separate channel backgrounds.
+- A global polarized-decay fit, following the channel equations and direct global analysis in Lakowicz, chapter 11, section 11.2.2. It jointly models the raw parallel and perpendicular decays with separate measured IRFs loaded directly from PicoQuant PTU files or from supported spreadsheet/text exports, a fixed known fluorescence lifetime, fixed G and exposure factors, periodic excitation, one rotational correlation time, a common IRF timing shift, and separate channel backgrounds.
+
+When PTU IRFs are selected, the plugin sums their photon histograms over the recording and uses one laser period. It rejects an IRF PTU when its TCSPC timing resolution or laser period does not match the sample PTU. Small trailing-bin differences caused by period rounding are cropped or zero-padded.
 
 Also supported: explicit parallel and perpendicular file selection, optional subpixel registration between acquisitions, spatial pooling with photon thresholds and validity masks, Poisson-deviance residual fitting with parameter-bound warnings, and CSV and NPZ export with provenance.
 

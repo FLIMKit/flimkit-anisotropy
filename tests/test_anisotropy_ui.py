@@ -116,7 +116,242 @@ def test_successful_analysis_collapses_inputs_to_show_results():
         root.destroy()
 
 
-def test_anisotropy_irf_browser_lists_supported_exports():
+def test_load_irf_curve_reads_ptu_histogram_and_pads_trailing_bins(tmp_path):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'measured_irf.ptu'
+    path.touch()
+    calls = {}
+
+    class FakePTUFile:
+        def __init__(self, source, verbose=False):
+            calls['source'] = source
+            calls['verbose'] = verbose
+            self.tcspc_res = 0.1e-9
+            self.period_ns = 0.4
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            calls['closed'] = True
+
+        def summed_decay(self, channel=None):
+            calls['channel'] = channel
+            return np.array([1.0, 4.0, 2.0])
+
+    curve = load_irf_curve(
+        path, n_bins=4, tcspc_res=0.1e-9,
+        expected_period_ns=0.4, ptu_channel=2,
+        ptu_reader_class=FakePTUFile)
+
+    np.testing.assert_allclose(curve, [1.0, 4.0, 2.0, 0.0])
+    assert calls == {
+        'source': path,
+        'verbose': False,
+        'channel': 2,
+        'closed': True,
+    }
+
+
+def test_load_irf_curve_crops_trailing_ptu_period_bin(tmp_path):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'measured_irf.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        tcspc_res = 0.1e-9
+        period_ns = 13.2
+
+        def __init__(self, source, verbose=False):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.arange(133, dtype=float) + 1.0
+
+    curve = load_irf_curve(
+        path, n_bins=132, tcspc_res=0.1e-9,
+        expected_period_ns=13.2, ptu_reader_class=FakePTUFile)
+
+    np.testing.assert_allclose(curve, np.arange(132, dtype=float) + 1.0)
+
+
+def test_load_irf_curve_preserves_supported_export_path(tmp_path):
+    from unittest.mock import patch
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'measured_irf.csv'
+    path.touch()
+    exported = object()
+    converted = object()
+
+    with (patch('flimkit.utils.xlsx_tools.load_irf_export',
+                return_value=exported) as load_export,
+          patch('flimkit.FLIM.irf_tools.irf_from_xlsx',
+                return_value=converted) as convert):
+        result = load_irf_curve(path, n_bins=132, tcspc_res=0.1e-9)
+
+    assert result is converted
+    load_export.assert_called_once_with(path, debug=False)
+    convert.assert_called_once_with(exported, 132, 0.1e-9)
+
+
+def test_load_irf_curve_validates_discarded_trailing_ptu_bin(tmp_path):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'invalid_trailing_bin.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        tcspc_res = 0.1e-9
+        period_ns = 0.3
+
+        def __init__(self, source, verbose=False):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.array([1.0, 4.0, 2.0, float('nan')])
+
+    with pytest.raises(ValueError, match='finite, non-negative, and non-zero'):
+        load_irf_curve(
+            path, n_bins=3, tcspc_res=0.1e-9,
+            expected_period_ns=0.3, ptu_reader_class=FakePTUFile)
+
+
+@pytest.mark.parametrize('decay_size', [2, 6])
+def test_load_irf_curve_rejects_large_ptu_bin_count_mismatch(
+        tmp_path, decay_size):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'wrong_bin_count.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        tcspc_res = 0.1e-9
+        period_ns = 0.4
+
+        def __init__(self, source, verbose=False):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.ones(decay_size)
+
+    with pytest.raises(ValueError, match='differs by more than one bin'):
+        load_irf_curve(
+            path, n_bins=4, tcspc_res=0.1e-9,
+            expected_period_ns=0.4, ptu_reader_class=FakePTUFile)
+
+
+def test_load_irf_curve_rejects_ptu_timing_resolution_mismatch(tmp_path):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'wrong_timing.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        def __init__(self, source, verbose=False):
+            self.tcspc_res = 0.2e-9
+            self.period_ns = 0.4
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.ones(4)
+
+    with pytest.raises(ValueError, match='timing resolution'):
+        load_irf_curve(
+            path, n_bins=4, tcspc_res=0.1e-9,
+            expected_period_ns=0.4, ptu_reader_class=FakePTUFile)
+
+
+def test_load_irf_curve_rejects_ptu_laser_period_mismatch(tmp_path):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'wrong_period.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        def __init__(self, source, verbose=False):
+            self.tcspc_res = 0.1e-9
+            self.period_ns = 0.8
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.ones(8)
+
+    with pytest.raises(ValueError, match='laser period'):
+        load_irf_curve(
+            path, n_bins=4, tcspc_res=0.1e-9,
+            expected_period_ns=0.4, ptu_reader_class=FakePTUFile)
+
+
+@pytest.mark.parametrize('decay', [
+    [0.0, 0.0, 0.0, 0.0],
+    [1.0, -1.0, 0.0, 0.0],
+    [1.0, float('nan'), 0.0, 0.0],
+])
+def test_load_irf_curve_rejects_invalid_ptu_histogram(tmp_path, decay):
+    import numpy as np
+    from flimkit_anisotropy.tool import load_irf_curve
+
+    path = tmp_path / 'invalid_irf.ptu'
+    path.touch()
+
+    class FakePTUFile:
+        def __init__(self, source, verbose=False):
+            self.tcspc_res = 0.1e-9
+            self.period_ns = 0.4
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def summed_decay(self, channel=None):
+            return np.asarray(decay)
+
+    with pytest.raises(ValueError, match='finite, non-negative, and non-zero'):
+        load_irf_curve(
+            path, n_bins=4, tcspc_res=0.1e-9,
+            expected_period_ns=0.4, ptu_reader_class=FakePTUFile)
+
+
+def test_anisotropy_irf_browser_lists_ptu_and_supported_exports():
     from flimkit_anisotropy.tool import AnisotropyTool
 
     tool = AnisotropyTool.__new__(AnisotropyTool)
@@ -127,9 +362,11 @@ def test_anisotropy_irf_browser_lists_supported_exports():
         tool._browse(variable, file_kind='irf')
 
     options = browse.call_args.kwargs
-    assert options['title'] == 'Select IRF export'
+    assert options['title'] == 'Select measured IRF'
     patterns = options['filetypes'][0][1]
-    for extension in ('*.xlsx', '*.csv', '*.tsv', '*.txt', '*.dat', '*.ascii', '*.asc'):
+    for extension in (
+            '*.ptu', '*.xlsx', '*.csv', '*.tsv', '*.txt', '*.dat',
+            '*.ascii', '*.asc'):
         assert extension in patterns
     assert options['filetypes'][-1] == ('All files', '*.*')
     assert variable.value == '/tmp/parallel.csv'
@@ -153,8 +390,8 @@ def test_anisotropy_dialog_offers_direct_and_preferred_modes():
                 pass
         assert 'Direct r(t) diagnostic (no IRF)' in labels
         assert 'Preferred global fit (Lakowicz Section 11.2.2)' in labels
-        assert 'Parallel IRF export' in labels
-        assert 'Perpendicular IRF export' in labels
+        assert 'Parallel IRF (PTU or export)' in labels
+        assert 'Perpendicular IRF (PTU or export)' in labels
         assert 'Method info...' in labels
     finally:
         root.destroy()
@@ -171,6 +408,7 @@ def test_method_info_states_global_fit_requirements():
         message = showinfo.call_args.args[1]
         assert 'known fluorescence lifetime' in message
         assert 'separate IRFs' in message
+        assert 'PTU' in message
         assert 'separate fitted backgrounds' in message
         assert 'resolved time-zero anisotropy' in message
     finally:
@@ -516,7 +754,7 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
           patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
                 return_value=expected),
           patch('flimkit_anisotropy.tool.load_irf_curve',
-                side_effect=[parallel_irf, perpendicular_irf]),
+                side_effect=[parallel_irf, perpendicular_irf]) as load_irf,
           patch('flimkit_anisotropy.anisotropy.fit_polarized_decays',
                 return_value=preferred_fit) as fit):
         result, _ = run_analysis(settings)
@@ -534,6 +772,12 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     assert call.kwargs['initial_parallel_background'] == 2.0
     assert call.kwargs['initial_perpendicular_background'] == 3.0
     assert call.kwargs['g_factor'] == 1.2
+    assert load_irf.call_count == 2
+    parallel_irf_call, perpendicular_irf_call = load_irf.call_args_list
+    assert parallel_irf_call.kwargs['expected_period_ns'] == 1.51
+    assert perpendicular_irf_call.kwargs['expected_period_ns'] == 1.51
+    assert parallel_irf_call.kwargs['ptu_channel'] == 0
+    assert perpendicular_irf_call.kwargs['ptu_channel'] == 0
     assert result.metadata['analysis_mode'] == 'global'
     assert result.metadata['parallel_irf_file'] == 'parallel.csv'
     assert result.metadata['perpendicular_irf_file'] == 'perpendicular.csv'

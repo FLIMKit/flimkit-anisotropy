@@ -73,10 +73,11 @@ class AnisotropyTool(tk.Toplevel):
         self._file_row(
             self.input_panel, 1, 'Perpendicular PTU', self.perpendicular_path)
         self._file_row(
-            self.input_panel, 2, 'Parallel IRF export', self.parallel_irf_path,
+            self.input_panel, 2, 'Parallel IRF (PTU or export)',
+            self.parallel_irf_path,
             file_kind='irf')
         self._file_row(
-            self.input_panel, 3, 'Perpendicular IRF export',
+            self.input_panel, 3, 'Perpendicular IRF (PTU or export)',
             self.perpendicular_irf_path, file_kind='irf')
 
         modes = ttk.LabelFrame(
@@ -192,11 +193,11 @@ class AnisotropyTool(tk.Toplevel):
 
     def _browse(self, variable, file_kind='ptu'):
         if file_kind == 'irf':
-            title = 'Select IRF export'
+            title = 'Select measured IRF'
             filetypes = [
-                ('IRF exports',
-                 ('*.xlsx', '*.csv', '*.tsv', '*.txt', '*.dat',
-                  '*.ascii', '*.asc')),
+                ('Measured IRF',
+                 ('*.ptu', '*.xlsx', '*.csv', '*.tsv', '*.txt', '*.dat',
+                   '*.ascii', '*.asc')),
                 ('All files', '*.*'),
             ]
         else:
@@ -221,10 +222,12 @@ class AnisotropyTool(tk.Toplevel):
             'correlation times near the IRF response.\n\n'
             'Preferred global fit:\n'
             'Fits the raw parallel and perpendicular photon counts together. '
-            'It uses separate IRFs, a known fluorescence lifetime, fixed G and '
-            'relative exposures, one rotational correlation time, one common '
-            'IRF timing shift, and separate fitted backgrounds. Previous laser '
-            'pulses are included.\n\n'
+            'It uses separate IRFs loaded directly from PTU files or from '
+            'supported exports. PTU IRFs must match the sample timing resolution '
+            'and laser period. The fit also uses a known fluorescence lifetime, '
+            'fixed G and relative exposures, one rotational correlation time, '
+            'one common IRF timing shift, and separate fitted backgrounds. '
+            'Previous laser pulses are included.\n\n'
             'The reported r(0) is the resolved time-zero anisotropy. It is not '
             'automatically the fundamental anisotropy because very fast motion '
             'may be hidden by the IRF.\n\n'
@@ -607,7 +610,40 @@ class AnisotropyTool(tk.Toplevel):
         self.status.set(f'Saved {Path(path).name}')
 
 
-def load_irf_curve(path, n_bins, tcspc_res):
+def load_irf_curve(path, n_bins, tcspc_res, expected_period_ns=None,
+                   ptu_channel=None, ptu_reader_class=None):
+    path = Path(path)
+    if path.suffix.lower() == '.ptu':
+        if ptu_reader_class is None:
+            from flimkit.formats.PTU.reader import PTUFile
+            ptu_reader_class = PTUFile
+        with ptu_reader_class(path, verbose=False) as irf_file:
+            if not np.isclose(
+                    irf_file.tcspc_res, tcspc_res, rtol=1e-6, atol=0.0):
+                raise ValueError(
+                    'IRF PTU timing resolution does not match the sample PTU')
+            if (expected_period_ns is not None
+                    and not np.isclose(
+                        irf_file.period_ns, expected_period_ns,
+                        rtol=1e-6, atol=0.0)):
+                raise ValueError(
+                    'IRF PTU laser period does not match the sample PTU')
+            decay = np.asarray(
+                irf_file.summed_decay(channel=ptu_channel), dtype=float)
+        if (decay.ndim != 1 or np.any(~np.isfinite(decay))
+                or np.any(decay < 0) or decay.sum() <= 0):
+            raise ValueError(
+                'IRF PTU histogram must be finite, non-negative, and non-zero')
+        if abs(decay.size - n_bins) > 1:
+            raise ValueError(
+                'IRF PTU bin count differs by more than one bin from the sample')
+        curve = np.zeros(n_bins, dtype=float)
+        curve[:min(n_bins, decay.size)] = decay[:n_bins]
+        if curve.sum() <= 0:
+            raise ValueError(
+                'IRF PTU histogram must be finite, non-negative, and non-zero')
+        return curve
+
     from flimkit.FLIM.irf_tools import irf_from_xlsx
     from flimkit.utils.xlsx_tools import load_irf_export
 
@@ -689,9 +725,13 @@ def run_analysis(settings):
         assert repetition_period_ns is not None
         fit_time_ns = time_ns[:global_fit_bins]
         parallel_irf = load_irf_curve(
-            settings['parallel_irf_path'], global_fit_bins, tcspc_res)
+            settings['parallel_irf_path'], global_fit_bins, tcspc_res,
+            expected_period_ns=repetition_period_ns,
+            ptu_channel=settings['parallel_channel'])
         perpendicular_irf = load_irf_curve(
-            settings['perpendicular_irf_path'], global_fit_bins, tcspc_res)
+            settings['perpendicular_irf_path'], global_fit_bins, tcspc_res,
+            expected_period_ns=repetition_period_ns,
+            ptu_channel=settings['perpendicular_channel'])
         result.polarized_fit = fit_polarized_decays(
             parallel.sum(axis=(0, 1))[:global_fit_bins],
             perpendicular.sum(axis=(0, 1))[:global_fit_bins],
