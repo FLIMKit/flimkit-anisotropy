@@ -2,7 +2,7 @@ from flimkit.plugins import tool
 
 FLIMKIT_PLUGIN_API = 1
 
-__version__ = '0.1.1'
+__version__ = '0.2.0'
 
 
 @tool(id='anisotropy', label='Time-Resolved Anisotropy...', menu='Tools', order=20)
