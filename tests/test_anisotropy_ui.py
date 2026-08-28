@@ -60,10 +60,40 @@ def test_anisotropy_dialog_exposes_explicit_file_roles():
         assert 'Perpendicular PTU' in labels
         assert 'Parallel exposure (relative)' in labels
         assert 'Perpendicular exposure (relative)' in labels
+        assert 'Shared scale value' in labels
+        assert 'Late-window start (ns)' in labels
+        assert 'Shared scale source' in labels
+        assert tuple(dialog.scale_source_combo['values']) == (
+            'Assumed scale', 'Calibrated G', 'Effective late-window scale')
         assert 'Parallel photon channel' in labels
         assert 'Perpendicular photon channel' in labels
         assert 'Calculate' in labels
+        assert 'Scale diagnostic...' in labels
         assert any('G=1 is an assumption' in label for label in labels)
+    finally:
+        root.destroy()
+
+
+def test_anisotropy_settings_record_shared_scale_source(tmp_path):
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    parallel = tmp_path / 'parallel.ptu'
+    perpendicular = tmp_path / 'perpendicular.ptu'
+    parallel.touch()
+    perpendicular.touch()
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.parallel_path.set(str(parallel))
+        dialog.perpendicular_path.set(str(perpendicular))
+        dialog.g_mode.set('late_window')
+        dialog.late_window_start_ns.set(9.6)
+
+        settings = dialog._settings()
+
+        assert settings['g_mode'] == 'late_window'
+        assert settings['late_window_start_ns'] == 9.6
+        assert settings['g_factor'] == 1.0
     finally:
         root.destroy()
 
@@ -101,7 +131,10 @@ def test_successful_analysis_collapses_inputs_to_show_results():
     root = _tk_root_or_skip()
     try:
         dialog = show_anisotropy_tool(root)
-        result = SimpleNamespace(perpendicular_shift=(0.0, 0.0))
+        result = SimpleNamespace(
+            perpendicular_shift=(0.0, 0.0), late_window_stability=object(),
+            g_factor=2.6,
+            metadata={'shared_scale_source': 'late_window'})
 
         with patch.object(dialog, '_draw_result'):
             dialog._analysis_finished(result, 0)
@@ -110,8 +143,32 @@ def test_successful_analysis_collapses_inputs_to_show_results():
         assert dialog.input_panel.winfo_manager() == ''
         assert dialog.toggle_inputs_button.cget('text') == 'Show inputs'
         assert 'disabled' not in dialog.calculate_button.state()
+        assert 'disabled' not in dialog.scale_diagnostic_button.state()
         assert 'disabled' not in dialog.save_npz_button.state()
         assert 'disabled' not in dialog.save_csv_button.state()
+        assert 'not calibrated physical G' in dialog.status.get()
+    finally:
+        root.destroy()
+
+
+def test_success_status_warns_for_uncalibrated_g_one():
+    from types import SimpleNamespace
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        result = SimpleNamespace(
+            perpendicular_shift=(0.0, 0.0),
+            g_factor=1.0,
+            metadata={'shared_scale_source': 'assumed'})
+
+        with patch.object(dialog, '_draw_result'):
+            dialog._analysis_finished(result, 0)
+
+        assert 'WARNING' in dialog.status.get()
+        assert 'G=1 is assumed, not calibrated' in dialog.status.get()
+        assert 'disabled' in dialog.scale_diagnostic_button.state()
     finally:
         root.destroy()
 
@@ -351,6 +408,56 @@ def test_load_irf_curve_rejects_invalid_ptu_histogram(tmp_path, decay):
             expected_period_ns=0.4, ptu_reader_class=FakePTUFile)
 
 
+def test_scale_diagnostic_plot_shows_nested_ratio_and_caveat():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    diagnostic = None
+    try:
+        dialog = show_anisotropy_tool(root)
+        stability = SimpleNamespace(
+            time_ns=np.array([8.0, 9.0, 10.0, 11.0]),
+            rolling_scale=np.array([3.7, 3.6, 3.5, np.nan]),
+            nested_scale=np.array([3.65, 3.58, 3.50, 3.45]),
+            nested_standard_error=np.array([0.08, 0.09, 0.12, 0.20]),
+            selected_start_bin=2,
+            selected_scale=3.50,
+            selected_parallel_photons=700.0,
+            selected_perpendicular_photons=200.0,
+            rolling_bins=3)
+        dialog.result = SimpleNamespace(
+            late_window_stability=stability,
+            g_factor=3.50,
+            metadata={
+                'shared_scale_source': 'late_window',
+                'shared_scale_interpretation': 'effective_late_window_scale',
+            })
+
+        diagnostic = dialog._show_scale_diagnostic()
+        root.update_idletasks()
+
+        axis = diagnostic.scale_axes[0]
+        assert axis.get_title() == 'Late-window stability'
+        labels = [line.get_label() for line in axis.lines]
+        assert '3-bin rolling ratio' in labels
+        assert 'Nested ratio to period end' in labels
+        assert 'Approx. 95% Poisson band' in (
+            collection.get_label() for collection in axis.collections)
+        summary = diagnostic.scale_summary.cget('text')
+        assert 'Effective scale: 3.5' in summary
+        assert '700 parallel, 200 perpendicular photons' in summary
+        assert 'not a calibrated physical G' in summary
+        assert 'approximate delta-method Poisson 95% interval' in summary
+        assert 'unreliable at low counts' in summary
+        assert 'Nested windows share photons' in summary
+    finally:
+        if diagnostic is not None:
+            diagnostic.destroy()
+        root.destroy()
+
+
 def test_anisotropy_irf_browser_lists_ptu_and_supported_exports():
     from flimkit_anisotropy.tool import AnisotropyTool
 
@@ -411,6 +518,8 @@ def test_method_info_states_global_fit_requirements():
         assert 'PTU' in message
         assert 'separate fitted backgrounds' in message
         assert 'resolved time-zero anisotropy' in message
+        assert 'assumed, calibrated, or effective late-window scale' in message
+        assert 'not a calibrated physical G' in message
     finally:
         root.destroy()
 
@@ -659,7 +768,11 @@ def test_global_fit_mode_draws_polarized_models_and_residuals():
             perpendicular_background=2.0,
             polarized_fit=fit,
             time_ns=np.arange(4, dtype=float),
-            metadata={},
+            g_factor=3.5,
+            metadata={
+                'shared_scale_source': 'late_window',
+                'shared_scale_interpretation': 'effective_late_window_scale',
+            },
         )
         dialog.peak_bin = 1
 
@@ -683,6 +796,8 @@ def test_global_fit_mode_draws_polarized_models_and_residuals():
         assert 'Fixed fluorescence lifetime' in summary
         assert 'Common IRF shift: 0.7 bins' in summary
         assert 'Fitted backgrounds: 2.5, 7' in summary
+        assert 'Effective late-window scale: 3.5' in summary
+        assert 'not calibrated physical G' in summary
         assert 'WARNING' in summary
         assert 'did not converge' in summary
         assert 'maximum evaluations reached' in summary
@@ -740,6 +855,8 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
         'auto_register': False,
         'background_bins': slice(0, 2),
         'g_factor': 1.2,
+        'g_mode': 'late_window',
+        'late_window_start_ns': 0.0,
         'spatial_window': 1,
         'stride': 1,
         'min_bin_photons': 0.0,
@@ -752,7 +869,7 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
 
     with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
           patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
-                return_value=expected),
+                return_value=expected) as analyze,
           patch('flimkit_anisotropy.tool.load_irf_curve',
                 side_effect=[parallel_irf, perpendicular_irf]) as load_irf,
           patch('flimkit_anisotropy.anisotropy.fit_polarized_decays',
@@ -771,7 +888,11 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     assert call.kwargs['intensity_lifetime_ns'] == 3.0
     assert call.kwargs['initial_parallel_background'] == 2.0
     assert call.kwargs['initial_perpendicular_background'] == 3.0
-    assert call.kwargs['g_factor'] == 1.2
+    expected_effective_scale = (64.0 / 1.5) / (64.0 / 0.8)
+    assert call.kwargs['g_factor'] == pytest.approx(expected_effective_scale)
+    assert analyze.call_args.kwargs['g_factor'] == pytest.approx(
+        expected_effective_scale)
+    assert result.g_factor == pytest.approx(expected_effective_scale)
     assert load_irf.call_count == 2
     parallel_irf_call, perpendicular_irf_call = load_irf.call_args_list
     assert parallel_irf_call.kwargs['expected_period_ns'] == 1.51
@@ -784,6 +905,193 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     assert result.metadata['repetition_period_ns'] == 1.51
     assert result.metadata['global_fit_bins'] == 15
     assert result.metadata['fixed_lifetime_ns'] == 3.0
+
+
+def test_run_analysis_applies_one_shared_late_window_scale():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import run_analysis
+
+    stacks = {
+        'parallel.ptu': np.array([[[10.0, 20.0, 30.0, 40.0]]]),
+        'perpendicular.ptu': np.array([[[5.0, 10.0, 15.0, 20.0]]]),
+    }
+
+    class FakePTUFile:
+        def __init__(self, path, verbose=False):
+            self.path = path
+            self.time_ns = np.arange(4, dtype=float)
+            self.period_ns = 4.0
+            self.tcspc_res = 1e-9
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def pixel_stack(self, channel):
+            return stacks[self.path]
+
+    expected = SimpleNamespace(metadata={})
+    settings = {
+        'parallel_path': 'parallel.ptu',
+        'perpendicular_path': 'perpendicular.ptu',
+        'analysis_mode': 'direct',
+        'parallel_channel': 0,
+        'perpendicular_channel': 0,
+        'analysis_start_ns': 0.0,
+        'analysis_stop_ns': 3.0,
+        'auto_register': False,
+        'background_bins': slice(0, 1),
+        'g_factor': 7.0,
+        'g_mode': 'late_window',
+        'late_window_start_ns': 2.0,
+        'spatial_window': 1,
+        'stride': 1,
+        'min_bin_photons': 0.0,
+        'min_map_photons': 0.0,
+        'parallel_exposure': 2.0,
+        'perpendicular_exposure': 1.0,
+    }
+
+    with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
+                return_value=expected) as analyze):
+        result, _ = run_analysis(settings)
+
+    assert analyze.call_args.kwargs['g_factor'] == pytest.approx(1.0)
+    assert result.g_factor == pytest.approx(1.0)
+    assert result.late_window_stability.selected_scale == pytest.approx(1.0)
+    assert result.metadata['shared_scale_source'] == 'late_window'
+    assert result.metadata['shared_scale_interpretation'] == (
+        'effective_late_window_scale')
+    assert result.metadata['requested_shared_scale'] == 7.0
+
+
+def test_effective_scale_requires_valid_matching_laser_periods():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import run_analysis
+
+    class FakePTUFile:
+        periods = {'parallel.ptu': None, 'perpendicular.ptu': None}
+
+        def __init__(self, path, verbose=False):
+            self.path = path
+            self.time_ns = np.arange(4, dtype=float)
+            self.period_ns = self.periods[path]
+            self.tcspc_res = 1e-9
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def pixel_stack(self, channel):
+            return np.ones((1, 1, 4), dtype=float)
+
+    settings = {
+        'parallel_path': 'parallel.ptu',
+        'perpendicular_path': 'perpendicular.ptu',
+        'analysis_mode': 'direct',
+        'parallel_channel': 0,
+        'perpendicular_channel': 0,
+        'analysis_start_ns': 0.0,
+        'analysis_stop_ns': 3.0,
+        'auto_register': False,
+        'background_bins': slice(0, 1),
+        'g_factor': 1.0,
+        'g_mode': 'late_window',
+        'late_window_start_ns': 2.0,
+        'spatial_window': 1,
+        'stride': 1,
+        'min_bin_photons': 0.0,
+        'min_map_photons': 0.0,
+        'parallel_exposure': 1.0,
+        'perpendicular_exposure': 1.0,
+    }
+    with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
+                return_value=SimpleNamespace(metadata={}))):
+        with pytest.raises(ValueError, match='requires a laser period'):
+            run_analysis(settings)
+        FakePTUFile.periods = {
+            'parallel.ptu': 4.0, 'perpendicular.ptu': 5.0}
+        with pytest.raises(ValueError, match='matching laser periods'):
+            run_analysis(settings)
+        FakePTUFile.periods = {
+            'parallel.ptu': 10.0, 'perpendicular.ptu': 10.0}
+        with pytest.raises(ValueError, match='incompatible with the stored'):
+            run_analysis(settings)
+
+
+def test_assumed_scale_survives_unavailable_late_window_diagnostic():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import run_analysis
+
+    stacks = {
+        'parallel.ptu': np.ones((1, 1, 4), dtype=float),
+        'perpendicular.ptu': np.ones((1, 1, 4), dtype=float),
+    }
+
+    class FakePTUFile:
+        period = 1.0
+
+        def __init__(self, path, verbose=False):
+            self.path = path
+            self.time_ns = np.arange(4, dtype=float)
+            self.period_ns = self.period
+            self.tcspc_res = 1e-9
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def pixel_stack(self, channel):
+            return stacks[self.path]
+
+    expected = SimpleNamespace(metadata={})
+    settings = {
+        'parallel_path': 'parallel.ptu',
+        'perpendicular_path': 'perpendicular.ptu',
+        'analysis_mode': 'direct',
+        'parallel_channel': 0,
+        'perpendicular_channel': 0,
+        'analysis_start_ns': 0.0,
+        'analysis_stop_ns': 3.0,
+        'auto_register': False,
+        'background_bins': slice(0, 1),
+        'g_factor': 1.2,
+        'g_mode': 'assumed',
+        'late_window_start_ns': 9.6,
+        'spatial_window': 1,
+        'stride': 1,
+        'min_bin_photons': 0.0,
+        'min_map_photons': 0.0,
+        'parallel_exposure': 1.0,
+        'perpendicular_exposure': 1.0,
+    }
+    with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
+                return_value=expected)):
+        result, _ = run_analysis(settings)
+        FakePTUFile.period = 4.0
+        stacks['perpendicular.ptu'] = np.array([[[1.0, 1.0, 0.0, 0.0]]])
+        settings['late_window_start_ns'] = 2.0
+        zero_tail_result, _ = run_analysis(settings)
+
+    assert result.g_factor == pytest.approx(1.2)
+    assert result.late_window_stability is None
+    assert result.metadata['late_window_diagnostic_available'] is False
+    assert result.metadata['shared_scale_source'] == 'assumed'
+    assert zero_tail_result.late_window_stability is None
+    assert 'contain photons in both channels' in (
+        zero_tail_result.metadata['late_window_diagnostic_error'])
 
 
 def test_run_analysis_records_photon_thresholds():
@@ -965,6 +1273,14 @@ def test_csv_export_includes_relative_time_and_provenance(tmp_path):
         perpendicular_shift=(0.25, -0.5),
         spatial_window=5,
         stride=1,
+        late_window_stability=SimpleNamespace(
+            nested_scale=np.array([3.5, 3.4]),
+            rolling_scale=np.array([3.6, np.nan]),
+            nested_standard_error=np.array([0.1, 0.2]),
+            selected_start_bin=1,
+            selected_scale=3.4,
+            selected_parallel_photons=680.0,
+            selected_perpendicular_photons=200.0),
         metadata={
             'parallel_file': 'parallel.ptu',
             'perpendicular_file': 'perpendicular.ptu',
@@ -976,6 +1292,11 @@ def test_csv_export_includes_relative_time_and_provenance(tmp_path):
             'analysis_stop_ns': 8.0,
             'min_bin_photons': 25.0,
             'min_map_photons': 500.0,
+            'shared_scale_source': 'late_window',
+            'shared_scale_interpretation': 'effective_late_window_scale',
+            'requested_shared_scale': 1.0,
+            'applied_shared_scale': 0.9,
+            'late_window_selected_start_ns': 2.0,
         },
     )
     path = tmp_path / 'decay.csv'
@@ -991,3 +1312,10 @@ def test_csv_export_includes_relative_time_and_provenance(tmp_path):
     assert rows[0]['parallel_file'] == 'parallel.ptu'
     assert rows[0]['perpendicular_channel'] == '1'
     assert rows[0]['min_map_photons'] == '500.0'
+    assert rows[0]['shared_scale_source'] == 'late_window'
+    assert rows[0]['shared_scale_interpretation'] == (
+        'effective_late_window_scale')
+    assert rows[0]['late_window_nested_scale'] == '3.5'
+    assert rows[0]['late_window_rolling_scale'] == '3.6'
+    assert rows[0]['late_window_nested_standard_error'] == '0.1'
+    assert rows[0]['late_window_selected_scale'] == '3.4'

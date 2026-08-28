@@ -187,6 +187,60 @@ def test_global_polarized_fit_reports_parameters_at_bounds():
     assert 'initial_anisotropy' in fitted.parameters_at_bounds
 
 
+def test_late_window_stability_uses_exposure_corrected_nested_counts():
+    from flimkit_anisotropy.anisotropy import calculate_late_window_stability
+
+    time_ns = np.arange(4, dtype=float)
+    parallel = np.array([10.0, 20.0, 30.0, 40.0])
+    perpendicular = np.array([5.0, 10.0, 15.0, 20.0])
+
+    result = calculate_late_window_stability(
+        parallel, perpendicular, time_ns,
+        parallel_exposure=2.0, perpendicular_exposure=1.0,
+        selected_start_ns=1.5)
+
+    np.testing.assert_allclose(result.nested_scale, 1.0)
+    np.testing.assert_allclose(
+        result.nested_standard_error,
+        np.sqrt(1.0 / np.array([100.0, 90.0, 70.0, 40.0])
+                + 1.0 / np.array([50.0, 45.0, 35.0, 20.0])))
+    assert result.selected_start_bin == 2
+    assert result.selected_scale == pytest.approx(1.0)
+    assert result.selected_parallel_photons == 70.0
+    assert result.selected_perpendicular_photons == 35.0
+    assert result.interpretation == 'effective_late_window_scale'
+
+
+def test_late_window_stability_reports_short_rolling_ratio():
+    from flimkit_anisotropy.anisotropy import calculate_late_window_stability
+
+    result = calculate_late_window_stability(
+        np.array([10.0, 20.0, 30.0, 40.0]),
+        np.array([5.0, 10.0, 15.0, 20.0]),
+        np.arange(4, dtype=float),
+        parallel_exposure=2.0, perpendicular_exposure=1.0,
+        selected_start_ns=2.0, rolling_bins=2)
+
+    np.testing.assert_allclose(result.rolling_scale[:3], 1.0)
+    assert np.isnan(result.rolling_scale[3])
+    assert result.rolling_bins == 2
+
+
+def test_late_window_stability_rejects_invalid_inputs():
+    from flimkit_anisotropy.anisotropy import calculate_late_window_stability
+
+    time_ns = np.arange(4, dtype=float)
+    with pytest.raises(ValueError, match='finite and non-negative'):
+        calculate_late_window_stability(
+            np.array([1.0, 2.0, -1.0, 4.0]), np.ones(4), time_ns)
+    with pytest.raises(ValueError, match='contain photons in both channels'):
+        calculate_late_window_stability(
+            np.ones(4), np.zeros(4), time_ns, selected_start_ns=2.0)
+    with pytest.raises(ValueError, match='inside the TCSPC time axis'):
+        calculate_late_window_stability(
+            np.ones(4), np.ones(4), time_ns, selected_start_ns=4.0)
+
+
 def test_calculate_anisotropy_uses_parallel_perpendicular_formula():
     from flimkit_anisotropy.anisotropy import calculate_anisotropy
 
@@ -500,7 +554,8 @@ def test_analyze_anisotropy_rejects_scalar_analysis_selector():
 
 def test_save_anisotropy_npz_preserves_masks_and_safe_metadata(tmp_path):
     from flimkit_anisotropy.anisotropy import (
-        PolarizedFitResult, analyze_anisotropy, save_anisotropy_npz)
+        PolarizedFitResult, analyze_anisotropy,
+        calculate_late_window_stability, save_anisotropy_npz)
 
     parallel = np.ones((2, 2, 4), dtype=float)
     perpendicular = np.ones((2, 2, 4), dtype=float)
@@ -528,6 +583,11 @@ def test_save_anisotropy_npz_preserves_masks_and_safe_metadata(tmp_path):
         common_irf_shift_bins=0.7,
         parallel_background=2.5,
         perpendicular_background=7.0)
+    result.late_window_stability = calculate_late_window_stability(
+        np.array([20.0, 30.0, 40.0, 50.0]),
+        np.array([10.0, 15.0, 20.0, 25.0]),
+        np.arange(4, dtype=float), selected_start_ns=2.0,
+        rolling_bins=2)
     path = tmp_path / 'result.npz'
 
     save_anisotropy_npz(result, path)
@@ -553,3 +613,13 @@ def test_save_anisotropy_npz_preserves_masks_and_safe_metadata(tmp_path):
         (result.parallel_decay + result.parallel_background)[:3])
     np.testing.assert_array_equal(
         saved['fit_parallel_model'], result.polarized_fit.parallel_model)
+    np.testing.assert_array_equal(
+        saved['late_window_time_ns'],
+        result.late_window_stability.time_ns)
+    np.testing.assert_array_equal(
+        saved['late_window_nested_scale'],
+        result.late_window_stability.nested_scale)
+    np.testing.assert_array_equal(
+        saved['late_window_rolling_scale'],
+        result.late_window_stability.rolling_scale)
+    assert saved['late_window_selected_scale'].item() == pytest.approx(2.0)

@@ -11,13 +11,23 @@ Written by Zhen Yuan Yeo. The history here is the original commits from [FLIMKit
 The tool takes matched sequential parallel and perpendicular PTU acquisitions and offers two methods:
 
 - A direct r(t) diagnostic, giving background-corrected anisotropy traces and registered, neighbourhood-pooled maps. It is a diagnostic only: division and IRF convolution do not commute, so it is not used to estimate rotational correlation times.
-- A global polarized-decay fit, following the channel equations and direct global analysis in Lakowicz, chapter 11, section 11.2.2. It jointly models the raw parallel and perpendicular decays with separate measured IRFs loaded directly from PicoQuant PTU files or from supported spreadsheet/text exports, a fixed known fluorescence lifetime, fixed G and exposure factors, periodic excitation, one rotational correlation time, a common IRF timing shift, and separate channel backgrounds.
+- A global polarized-decay fit, following the channel equations and direct global analysis in Lakowicz, chapter 11, section 11.2.2. It jointly models the raw parallel and perpendicular decays with separate measured IRFs loaded directly from PicoQuant PTU files or from supported spreadsheet/text exports, a fixed known fluorescence lifetime, one shared polarization-channel scale and exposure factors, periodic excitation, one rotational correlation time, a common IRF timing shift, and separate channel backgrounds.
 
 When PTU IRFs are selected, the plugin sums their photon histograms over the recording and uses one laser period. It rejects an IRF PTU when its TCSPC timing resolution or laser period does not match the sample PTU. Small trailing-bin differences caused by period rounding are cropped or zero-padded.
 
-Also supported: explicit parallel and perpendicular file selection, optional subpixel registration between acquisitions, spatial pooling with photon thresholds and validity masks, Poisson-deviance residual fitting with parameter-bound warnings, and CSV and NPZ export with provenance.
+Also supported: explicit parallel and perpendicular file selection, optional subpixel registration between acquisitions, spatial pooling with photon thresholds and validity masks, Poisson-deviance residual fitting with parameter-bound warnings, a late-window scale-stability diagnostic, and CSV and NPZ export with provenance.
 
-The fit is deliberately constrained. G = 1 is an assumption unless channel sensitivity has been calibrated, the fitted r(0) is the resolved time-zero anisotropy and may not equal the fundamental anisotropy, and a bound-hit result is reported as constrained rather than accepted. Multiple lifetimes, multiple rotational components, per-pixel rotational fitting and calibrated confidence intervals are not implemented. The rotational correlation time has not yet been validated against a known standard.
+## Shared polarization-channel scale
+
+One shared scale is applied to the entire image and to both the direct diagnostic and global fit. Its source must be labelled as one of:
+
+- **Assumed scale**: a user-supplied value without calibration evidence. `G = 1` is explicitly warned as an uncalibrated assumption.
+- **Calibrated G**: a user-supplied value that the user declares was measured independently. The software records this declaration but cannot verify it.
+- **Effective late-window scale**: estimated from exposure-normalized, full-FOV photon sums from the chosen late-window start to the end of the laser period.
+
+The **Scale diagnostic...** plot shows a short rolling parallel/perpendicular ratio, nested ratios to the period end, and an approximate Poisson 95% interval from the delta method. At low counts this interval can extend below zero and its coverage is not reliable. Nested windows share photons and are therefore correlated. The late-window calculation uses raw counts without background subtraction and retains previous-pulse fluorescence. It assumes that anisotropy approaches zero in the selected tail. Its result is an effective channel scale, **not** a calibrated physical G-factor. Continued drift means that the selected window is not a stable plateau.
+
+The fit is deliberately constrained. An effective or assumed scale is not calibration, the fitted r(0) is the resolved time-zero anisotropy and may not equal the fundamental anisotropy, and a bound-hit result is reported as constrained rather than accepted. Multiple lifetimes, multiple rotational components, per-pixel rotational fitting and calibrated confidence intervals are not implemented. The rotational correlation time has not yet been validated against a known standard.
 
 ## Installing
 
