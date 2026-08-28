@@ -30,6 +30,21 @@ class AnisotropyResult:
     perpendicular_exposure: float
     metadata: dict = field(default_factory=dict)
     polarized_fit: 'PolarizedFitResult | None' = None
+    late_window_stability: 'LateWindowStabilityResult | None' = None
+
+
+@dataclass
+class LateWindowStabilityResult:
+    time_ns: np.ndarray
+    nested_scale: np.ndarray
+    nested_standard_error: np.ndarray
+    rolling_scale: np.ndarray
+    rolling_bins: int
+    selected_start_bin: int
+    selected_scale: float
+    selected_parallel_photons: float
+    selected_perpendicular_photons: float
+    interpretation: str = 'effective_late_window_scale'
 
 
 @dataclass
@@ -384,6 +399,71 @@ def fit_polarized_decays(parallel, perpendicular, time_ns,
         perpendicular_background=perpendicular_bg)
 
 
+def calculate_late_window_stability(
+        parallel, perpendicular, time_ns, parallel_exposure=1.0,
+        perpendicular_exposure=1.0, selected_start_ns=0.0,
+        rolling_bins=None):
+    parallel = np.asarray(parallel, dtype=float)
+    perpendicular = np.asarray(perpendicular, dtype=float)
+    time_ns = np.asarray(time_ns, dtype=float)
+    if (parallel.ndim != 1 or perpendicular.ndim != 1
+            or time_ns.ndim != 1 or parallel.shape != perpendicular.shape
+            or parallel.shape != time_ns.shape or parallel.size < 2):
+        raise ValueError(
+            'Late-window decays and time axis must be matching one-dimensional arrays')
+    if (np.any(~np.isfinite(parallel)) or np.any(parallel < 0)
+            or np.any(~np.isfinite(perpendicular))
+            or np.any(perpendicular < 0)
+            or np.any(~np.isfinite(time_ns)) or np.any(np.diff(time_ns) <= 0)):
+        raise ValueError(
+            'Late-window counts must be finite and non-negative and time must increase')
+    exposures = np.asarray(
+        [parallel_exposure, perpendicular_exposure], dtype=float)
+    if np.any(~np.isfinite(exposures)) or np.any(exposures <= 0):
+        raise ValueError('Exposure values must be positive and finite')
+    if rolling_bins is None:
+        rolling_bins = min(5, parallel.size)
+    if (not isinstance(rolling_bins, (int, np.integer))
+            or rolling_bins < 1 or rolling_bins > parallel.size):
+        raise ValueError('rolling_bins must fit inside the TCSPC time axis')
+    if (not np.isfinite(selected_start_ns)
+            or selected_start_ns < time_ns[0]
+            or selected_start_ns > time_ns[-1]):
+        raise ValueError('Late-window start must lie inside the TCSPC time axis')
+
+    parallel_sums = np.cumsum(parallel[::-1])[::-1]
+    perpendicular_sums = np.cumsum(perpendicular[::-1])[::-1]
+    valid = (parallel_sums > 0) & (perpendicular_sums > 0)
+    nested_scale = np.full(time_ns.shape, np.nan, dtype=float)
+    nested_standard_error = np.full(time_ns.shape, np.nan, dtype=float)
+    nested_scale[valid] = (
+        (parallel_sums[valid] / parallel_exposure)
+        / (perpendicular_sums[valid] / perpendicular_exposure))
+    nested_standard_error[valid] = nested_scale[valid] * np.sqrt(
+        1.0 / parallel_sums[valid] + 1.0 / perpendicular_sums[valid])
+    rolling_parallel = np.convolve(
+        parallel, np.ones(rolling_bins), mode='valid')
+    rolling_perpendicular = np.convolve(
+        perpendicular, np.ones(rolling_bins), mode='valid')
+    rolling_scale = np.full(time_ns.shape, np.nan, dtype=float)
+    rolling_valid = (rolling_parallel > 0) & (rolling_perpendicular > 0)
+    rolling_scale[:rolling_parallel.size][rolling_valid] = (
+        (rolling_parallel[rolling_valid] / parallel_exposure)
+        / (rolling_perpendicular[rolling_valid] / perpendicular_exposure))
+    selected_start_bin = int(np.searchsorted(time_ns, selected_start_ns))
+    if not valid[selected_start_bin]:
+        raise ValueError('Selected late window must contain photons in both channels')
+    return LateWindowStabilityResult(
+        time_ns=time_ns, nested_scale=nested_scale,
+        nested_standard_error=nested_standard_error,
+        rolling_scale=rolling_scale, rolling_bins=int(rolling_bins),
+        selected_start_bin=selected_start_bin,
+        selected_scale=float(nested_scale[selected_start_bin]),
+        selected_parallel_photons=float(parallel_sums[selected_start_bin]),
+        selected_perpendicular_photons=float(
+            perpendicular_sums[selected_start_bin]))
+
+
 def calculate_anisotropy(parallel, perpendicular, g_factor=1.0,
                           min_denominator=0.0, parallel_exposure=1.0,
                           perpendicular_exposure=1.0):
@@ -610,6 +690,23 @@ def save_anisotropy_npz(result, path):
         'spatial_window': result.spatial_window,
         'stride': result.stride,
     }
+    if result.late_window_stability is not None:
+        stability = result.late_window_stability
+        payload.update({
+            'late_window_time_ns': stability.time_ns,
+            'late_window_nested_scale': stability.nested_scale,
+            'late_window_nested_standard_error': (
+                stability.nested_standard_error),
+            'late_window_rolling_scale': stability.rolling_scale,
+            'late_window_rolling_bins': stability.rolling_bins,
+            'late_window_selected_start_bin': stability.selected_start_bin,
+            'late_window_selected_scale': stability.selected_scale,
+            'late_window_selected_parallel_photons': (
+                stability.selected_parallel_photons),
+            'late_window_selected_perpendicular_photons': (
+                stability.selected_perpendicular_photons),
+            'late_window_interpretation': stability.interpretation,
+        })
     if result.polarized_fit is not None:
         fit = result.polarized_fit
         payload.update({

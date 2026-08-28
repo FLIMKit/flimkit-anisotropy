@@ -1,5 +1,6 @@
 import csv
 import queue
+import textwrap
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -31,6 +32,8 @@ class AnisotropyTool(tk.Toplevel):
         self.analysis_mode = tk.StringVar(value='direct')
         self.fixed_lifetime_ns = tk.DoubleVar(value=3.0)
         self.g_factor = tk.DoubleVar(value=1.0)
+        self.g_mode = tk.StringVar(value='Assumed scale')
+        self.late_window_start_ns = tk.DoubleVar(value=9.6)
         self.parallel_exposure = tk.DoubleVar(value=1.0)
         self.perpendicular_exposure = tk.DoubleVar(value=1.0)
         self.parallel_channel = tk.IntVar(value=0)
@@ -54,6 +57,10 @@ class AnisotropyTool(tk.Toplevel):
         self.calculate_button = ttk.Button(
             self.toolbar, text='Calculate', command=self._start_analysis)
         self.calculate_button.pack(side='left', padx=(6, 0))
+        self.scale_diagnostic_button = ttk.Button(
+            self.toolbar, text='Scale diagnostic...',
+            command=self._show_scale_diagnostic, state='disabled')
+        self.scale_diagnostic_button.pack(side='left', padx=(6, 0))
         self.save_npz_button = ttk.Button(
             self.toolbar, text='Save NPZ...', command=self._save_npz,
             state='disabled')
@@ -97,7 +104,8 @@ class AnisotropyTool(tk.Toplevel):
         settings.grid(row=5, column=0, columnspan=3, sticky='ew', pady=(8, 0))
         fields = [
             ('Known lifetime (ns, global fit)', self.fixed_lifetime_ns),
-            ('G factor', self.g_factor),
+            ('Shared scale value', self.g_factor),
+            ('Late-window start (ns)', self.late_window_start_ns),
             ('Parallel exposure (relative)', self.parallel_exposure),
             ('Perpendicular exposure (relative)', self.perpendicular_exposure),
             ('Parallel photon channel', self.parallel_channel),
@@ -118,13 +126,23 @@ class AnisotropyTool(tk.Toplevel):
                 row=row, column=base, sticky='w', padx=(0, 4), pady=2)
             ttk.Entry(settings, textvariable=variable, width=12).grid(
                 row=row, column=base + 1, sticky='w', padx=(0, 12), pady=2)
+        ttk.Label(settings, text='Shared scale source').grid(
+            row=5, column=0, sticky='w', padx=(0, 4), pady=(4, 0))
+        self.scale_source_combo = ttk.Combobox(
+            settings, textvariable=self.g_mode, state='readonly', width=27,
+            values=('Assumed scale', 'Calibrated G',
+                    'Effective late-window scale'))
+        self.scale_source_combo.grid(
+            row=5, column=1, columnspan=2, sticky='w', padx=(0, 12),
+            pady=(4, 0))
         ttk.Checkbutton(
             settings, text='Auto-register perpendicular image to parallel image',
             variable=self.auto_register).grid(
-                row=5, column=0, columnspan=6, sticky='w', pady=(4, 0))
+                row=5, column=3, columnspan=3, sticky='w', pady=(4, 0))
 
         note = ('File roles are explicit; FLIMKit does not infer them from names. '
-                'G=1 is an assumption unless calibrated independently.')
+                'G=1 is an assumption unless calibrated independently. An '
+                'effective late-window scale is not a calibrated physical G.')
         ttk.Label(self.input_panel, text=note, foreground='#555555').grid(
             row=6, column=0, columnspan=3, sticky='w', pady=(6, 0))
 
@@ -211,6 +229,83 @@ class AnisotropyTool(tk.Toplevel):
         if path:
             variable.set(path)
 
+    def _show_scale_diagnostic(self):
+        if self.result is None:
+            return None
+        stability = getattr(self.result, 'late_window_stability', None)
+        if stability is None:
+            return None
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
+        diagnostic = tk.Toplevel(self)
+        diagnostic.title('Late-window stability')
+        diagnostic.geometry('940x740')
+        figure = Figure(figsize=(9.0, 5.6), dpi=100)
+        figure.subplots_adjust(left=0.10, right=0.98, bottom=0.14, top=0.93)
+        axis = figure.subplots()
+        time_ns = stability.time_ns
+        axis.plot(
+            time_ns, stability.rolling_scale, color='#888888', linewidth=1.5,
+            label=f'{stability.rolling_bins}-bin rolling ratio')
+        axis.plot(
+            time_ns, stability.nested_scale, color='#1769aa', linewidth=2.2,
+            label='Nested ratio to period end')
+        lower = stability.nested_scale - 1.96 * stability.nested_standard_error
+        upper = stability.nested_scale + 1.96 * stability.nested_standard_error
+        axis.fill_between(
+            time_ns, lower, upper, color='#1769aa', alpha=0.18,
+            label='Approx. 95% Poisson band')
+        selected_time = time_ns[stability.selected_start_bin]
+        axis.axvline(selected_time, color='#c62828', linestyle='--', linewidth=1.5)
+        axis.axhline(
+            stability.selected_scale, color='#c62828', linestyle=':',
+            linewidth=1.5)
+        axis.set_title('Late-window stability')
+        axis.set_xlabel('Window start (ns)')
+        axis.set_ylabel('Parallel / perpendicular scale')
+        axis.grid(alpha=0.2)
+        axis.legend(loc='best')
+
+        source = self.result.metadata.get('shared_scale_source', 'assumed')
+        if source == 'late_window':
+            applied = f'Effective scale: {self.result.g_factor:.6g}'
+        elif source == 'calibrated':
+            applied = f'User-declared calibrated G: {self.result.g_factor:.6g}'
+        else:
+            applied = f'Uncalibrated assumed scale: {self.result.g_factor:.6g}'
+        summary = (
+            f'{applied}\n'
+            f'Selected start: {selected_time:.6g} ns; '
+            f'{stability.selected_parallel_photons:g} parallel, '
+            f'{stability.selected_perpendicular_photons:g} perpendicular photons\n'
+            'Late-window estimate assumes r(t) approaches zero; it is not a '
+            'calibrated physical G.\n'
+            'Shaded band: approximate delta-method Poisson 95% interval; '
+            'unreliable at low counts.\n'
+            'Nested windows share photons and are correlated. Raw counts are '
+            'used without background subtraction; previous-pulse fluorescence '
+            'remains included.')
+        axis.set_facecolor('white')
+        axis.tick_params(axis='both', colors='#222222')
+        axis.title.set_color('#222222')
+        axis.xaxis.label.set_color('#222222')
+        axis.yaxis.label.set_color('#222222')
+        figure.set_facecolor('white')
+        summary_label = ttk.Label(
+            diagnostic, text=summary, justify='left', wraplength=900,
+            padding=(10, 4, 10, 10))
+        summary_label.pack(side='bottom', fill='x')
+        canvas = FigureCanvasTkAgg(figure, master=diagnostic)
+        canvas.get_tk_widget().pack(
+            side='top', fill='both', expand=True, padx=8, pady=(8, 0))
+        canvas.draw_idle()
+        diagnostic.scale_figure = figure
+        diagnostic.scale_axes = (axis,)
+        diagnostic.scale_summary = summary_label
+        diagnostic.scale_canvas = canvas
+        return diagnostic
+
     def _show_method_info(self):
         messagebox.showinfo(
             'Time-resolved anisotropy methods',
@@ -225,9 +320,11 @@ class AnisotropyTool(tk.Toplevel):
             'It uses separate IRFs loaded directly from PTU files or from '
             'supported exports. PTU IRFs must match the sample timing resolution '
             'and laser period. The fit also uses a known fluorescence lifetime, '
-            'fixed G and relative exposures, one rotational correlation time, '
-            'one common IRF timing shift, and separate fitted backgrounds. '
-            'Previous laser pulses are included.\n\n'
+            'one shared assumed, calibrated, or effective late-window scale, '
+            'relative exposures, one rotational correlation time, one common IRF '
+            'timing shift, and separate fitted backgrounds. Previous laser pulses '
+            'are included. An effective late-window scale is not a calibrated '
+            'physical G.\n\n'
             'The reported r(0) is the resolved time-zero anisotropy. It is not '
             'automatically the fundamental anisotropy because very fast motion '
             'may be hidden by the IRF.\n\n'
@@ -288,7 +385,19 @@ class AnisotropyTool(tk.Toplevel):
             raise ValueError('Exposure values must be positive and finite')
         g_factor = self.g_factor.get()
         if not np.isfinite(g_factor) or g_factor <= 0:
-            raise ValueError('G factor must be positive and finite')
+            raise ValueError('Shared scale value must be positive and finite')
+        g_mode_names = {
+            'Assumed scale': 'assumed',
+            'Calibrated G': 'calibrated',
+            'Effective late-window scale': 'late_window',
+        }
+        g_mode = g_mode_names.get(self.g_mode.get(), self.g_mode.get())
+        if g_mode not in {'assumed', 'calibrated', 'late_window'}:
+            raise ValueError('Choose a valid shared scale source')
+        late_window_start_ns = self.late_window_start_ns.get()
+        if (not np.isfinite(late_window_start_ns)
+                or late_window_start_ns < 0):
+            raise ValueError('Late-window start must be finite and non-negative')
         min_bin_photons = self.min_bin_photons.get()
         min_map_photons = self.min_map_photons.get()
         if (not np.isfinite(min_bin_photons) or min_bin_photons < 0
@@ -304,6 +413,8 @@ class AnisotropyTool(tk.Toplevel):
                 perpendicular_irf if analysis_mode == 'global' else None),
             'fixed_lifetime_ns': fixed_lifetime_ns,
             'g_factor': g_factor,
+            'g_mode': g_mode,
+            'late_window_start_ns': late_window_start_ns,
             'parallel_exposure': parallel_exposure,
             'perpendicular_exposure': perpendicular_exposure,
             'parallel_channel': parallel_channel,
@@ -372,11 +483,30 @@ class AnisotropyTool(tk.Toplevel):
         self.result = result
         self.peak_bin = peak_bin
         self.calculate_button.configure(state='normal')
+        diagnostic_state = (
+            'normal' if getattr(result, 'late_window_stability', None) is not None
+            else 'disabled')
+        self.scale_diagnostic_button.configure(state=diagnostic_state)
         self.save_npz_button.configure(state='normal')
         self.save_csv_button.configure(state='normal')
         shift_y, shift_x = result.perpendicular_shift
-        self.status.set(
+        status = (
             f'Done. Perpendicular shift: ({shift_y:.2f}, {shift_x:.2f}) px')
+        metadata = getattr(result, 'metadata', {})
+        scale_source = metadata.get('shared_scale_source')
+        applied_scale = getattr(result, 'g_factor', None)
+        if scale_source == 'assumed' and applied_scale is not None:
+            if np.isclose(applied_scale, 1.0):
+                status += ' — WARNING: G=1 is assumed, not calibrated.'
+            else:
+                status += f' — Uncalibrated assumed scale: {applied_scale:.4g}.'
+        elif scale_source == 'late_window' and applied_scale is not None:
+            status += (
+                f' — Effective late-window scale: {applied_scale:.4g}; '
+                'not calibrated physical G.')
+        elif scale_source == 'calibrated' and applied_scale is not None:
+            status += f' — User-declared calibrated G: {applied_scale:.4g}.'
+        self.status.set(status)
         self._set_inputs_visible(False)
         self._draw_result()
 
@@ -485,23 +615,45 @@ class AnisotropyTool(tk.Toplevel):
             f'Fitted backgrounds: {fit.parallel_background:.4g}, '
             f'{fit.perpendicular_background:.4g}',
             f'Poisson deviance: {fit.poisson_deviance:.4g}',
+        ]
+        scale_source = self.result.metadata.get(
+            'shared_scale_source', 'assumed')
+        if scale_source == 'late_window':
+            summary_lines.extend([
+                f'Effective late-window scale: {self.result.g_factor:.4g}',
+                'WARNING: effective scale is not calibrated physical G',
+            ])
+        elif scale_source == 'calibrated':
+            summary_lines.extend([
+                f'User-declared calibrated G: {self.result.g_factor:.4g}',
+                'Calibration status supplied by user',
+            ])
+        else:
+            summary_lines.extend([
+                f'Uncalibrated assumed scale: {self.result.g_factor:.4g}',
+                'WARNING: assumed scale is not calibrated',
+            ])
+        summary_lines.extend([
             'Lakowicz, Section 11.2.2',
             'Separate IRFs fitted simultaneously',
-        ]
+        ])
         if not getattr(fit, 'success', True):
-            summary_lines.extend([
-                'WARNING: optimizer did not converge:',
-                str(getattr(fit, 'message', 'unknown reason')),
-            ])
+            summary_lines.append('WARNING: optimizer did not converge:')
+            summary_lines.extend(textwrap.wrap(
+                str(getattr(fit, 'message', 'unknown reason')), width=48))
         parameters_at_bounds = getattr(fit, 'parameters_at_bounds', ())
         if parameters_at_bounds:
-            summary_lines.extend([
-                'WARNING: fit reached parameter bounds:',
-                ', '.join(parameters_at_bounds),
-            ])
+            summary_lines.append('WARNING: fit reached parameter bounds:')
+            summary_lines.extend(textwrap.wrap(
+                ', '.join(parameters_at_bounds), width=48))
         summary = '\n'.join(summary_lines)
-        summary_fontsize = 8 if len(summary_lines) <= 12 else 7
-        self.axes[1, 1].set_position([0.60, 0.01, 0.37, 0.48])
+        if len(summary_lines) <= 12:
+            summary_fontsize = 8
+        elif len(summary_lines) <= 15:
+            summary_fontsize = 7
+        else:
+            summary_fontsize = 6
+        self.axes[1, 1].set_position([0.60, 0.01, 0.37, 0.55])
         self.axes[1, 1].text(
             0.05, 0.95, summary, ha='left', va='top',
             fontsize=summary_fontsize,
@@ -548,6 +700,15 @@ class AnisotropyTool(tk.Toplevel):
             'analysis_stop_ns': metadata.get('analysis_stop_ns', ''),
             'min_bin_photons': metadata.get('min_bin_photons', ''),
             'min_map_photons': metadata.get('min_map_photons', ''),
+            'shared_scale_source': metadata.get('shared_scale_source', ''),
+            'shared_scale_interpretation': metadata.get(
+                'shared_scale_interpretation', ''),
+            'requested_shared_scale': metadata.get(
+                'requested_shared_scale', ''),
+            'applied_shared_scale': metadata.get(
+                'applied_shared_scale', self.result.g_factor),
+            'late_window_selected_start_ns': metadata.get(
+                'late_window_selected_start_ns', ''),
             'perpendicular_shift_y': shift_y,
             'perpendicular_shift_x': shift_x,
             'spatial_window': self.result.spatial_window,
@@ -558,6 +719,20 @@ class AnisotropyTool(tk.Toplevel):
             'anisotropy', 'valid',
         ]
         fit = getattr(self.result, 'polarized_fit', None)
+        stability = getattr(self.result, 'late_window_stability', None)
+        late_fields = []
+        if stability is not None:
+            late_fields = [
+                'late_window_nested_scale', 'late_window_rolling_scale',
+                'late_window_nested_standard_error',
+            ]
+            provenance.update({
+                'late_window_selected_scale': stability.selected_scale,
+                'late_window_selected_parallel_photons': (
+                    stability.selected_parallel_photons),
+                'late_window_selected_perpendicular_photons': (
+                    stability.selected_perpendicular_photons),
+            })
         fit_fields = []
         if fit is not None:
             fit_fields = [
@@ -574,7 +749,7 @@ class AnisotropyTool(tk.Toplevel):
                 'perpendicular_fit_background': fit.perpendicular_background,
                 'poisson_deviance': fit.poisson_deviance,
             })
-        fieldnames.extend([*fit_fields, *provenance])
+        fieldnames.extend([*fit_fields, *late_fields, *provenance])
         peak_time = self.result.time_ns[self.peak_bin]
         with open(path, 'w', newline='') as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -597,6 +772,14 @@ class AnisotropyTool(tk.Toplevel):
                         'parallel_residual': fit.parallel_residual[index],
                         'perpendicular_residual': fit.perpendicular_residual[index],
                     }
+                late_values = {}
+                if stability is not None and index < len(stability.nested_scale):
+                    late_values = {
+                        'late_window_nested_scale': stability.nested_scale[index],
+                        'late_window_rolling_scale': stability.rolling_scale[index],
+                        'late_window_nested_standard_error': (
+                            stability.nested_standard_error[index]),
+                    }
                 writer.writerow({
                     'time_ns': time_ns,
                     'time_after_peak_ns': time_ns - peak_time,
@@ -605,6 +788,7 @@ class AnisotropyTool(tk.Toplevel):
                     'anisotropy': anisotropy,
                     'valid': np.isfinite(anisotropy),
                     **fit_values,
+                    **late_values,
                     **provenance,
                 })
         self.status.set(f'Saved {Path(path).name}')
@@ -653,7 +837,8 @@ def load_irf_curve(path, n_bins, tcspc_res, expected_period_ns=None,
 
 def run_analysis(settings):
     from .anisotropy import (
-        analyze_anisotropy, estimate_translation, fit_polarized_decays)
+        analyze_anisotropy, calculate_late_window_stability,
+        estimate_translation, fit_polarized_decays)
     from flimkit.formats.PTU.reader import PTUFile
 
     with PTUFile(settings['parallel_path'], verbose=False) as parallel_file:
@@ -672,30 +857,83 @@ def run_analysis(settings):
     if not np.allclose(time_ns, perpendicular_time):
         raise ValueError('Polarization PTUs must have matching time axes')
     analysis_mode = settings.get('analysis_mode', 'direct')
+    scale_source = settings.get('g_mode', 'assumed')
+    interpretations = {
+        'assumed': 'uncalibrated_assumption',
+        'calibrated': 'user_declared_calibrated_g',
+        'late_window': 'effective_late_window_scale',
+    }
+    if scale_source not in interpretations:
+        raise ValueError('Choose a valid shared scale source')
+
     global_fit_bins = None
     repetition_period_ns = None
-    if analysis_mode == 'global':
-        if (parallel_period_ns is None
-                or not np.isfinite(parallel_period_ns)
-                or parallel_period_ns <= 0
-                or perpendicular_period_ns is None
-                or not np.isfinite(perpendicular_period_ns)
-                or perpendicular_period_ns <= 0):
+    period_bins = None
+    period_error = None
+    periods = np.asarray(
+        [parallel_period_ns, perpendicular_period_ns], dtype=object)
+    if any(value is None for value in periods):
+        period_error = 'laser period is missing from a polarization PTU'
+    else:
+        numeric_periods = np.asarray(periods, dtype=float)
+        if np.any(~np.isfinite(numeric_periods)) or np.any(numeric_periods <= 0):
+            period_error = 'laser period must be finite and positive'
+        elif not np.isclose(numeric_periods[0], numeric_periods[1]):
+            period_error = 'Polarization PTUs must have matching laser periods'
+        elif time_ns.size < 2:
+            period_error = 'stored TCSPC time axis is too short'
+        else:
+            time_step_ns = float(np.median(np.diff(time_ns)))
+            candidate_bins = int(round(float(numeric_periods[0]) / time_step_ns))
+            if candidate_bins < 2 or candidate_bins > time_ns.size:
+                period_error = (
+                    'Laser period is incompatible with the stored TCSPC time axis')
+            else:
+                repetition_period_ns = float(numeric_periods[0])
+                period_bins = candidate_bins
+
+    period_required = analysis_mode == 'global' or scale_source == 'late_window'
+    if period_required and period_error is not None:
+        if ('missing' in period_error
+                or 'finite and positive' in period_error):
+            if scale_source == 'late_window':
+                raise ValueError(
+                    'Effective late-window scale requires a laser period')
             raise ValueError('Preferred global fitting requires a laser period')
-        if not np.isclose(parallel_period_ns, perpendicular_period_ns):
-            raise ValueError('Polarization PTUs must have matching laser periods')
+        raise ValueError(period_error)
+    if analysis_mode == 'global':
         if tcspc_res is None or not np.isfinite(tcspc_res) or tcspc_res <= 0:
             raise ValueError('Preferred global fitting requires TCSPC resolution')
-        repetition_period_ns = float(parallel_period_ns)
-        time_step_ns = float(np.median(np.diff(time_ns)))
-        global_fit_bins = int(round(repetition_period_ns / time_step_ns))
-        if global_fit_bins < 2 or global_fit_bins > time_ns.size:
-            raise ValueError(
-                'Laser period is incompatible with the stored TCSPC time axis')
+        assert period_bins is not None
+        global_fit_bins = period_bins
+
+    late_window_stability = None
+    diagnostic_error = period_error
+    if period_bins is not None:
+        try:
+            late_window_stability = calculate_late_window_stability(
+                parallel.sum(axis=(0, 1))[:period_bins],
+                perpendicular.sum(axis=(0, 1))[:period_bins],
+                time_ns[:period_bins],
+                parallel_exposure=settings['parallel_exposure'],
+                perpendicular_exposure=settings['perpendicular_exposure'],
+                selected_start_ns=settings.get(
+                    'late_window_start_ns', float(time_ns[0])))
+            diagnostic_error = None
+        except ValueError as exc:
+            if scale_source == 'late_window':
+                raise
+            diagnostic_error = str(exc)
+    requested_scale = float(settings['g_factor'])
+    if scale_source == 'late_window':
+        assert late_window_stability is not None
+        applied_scale = late_window_stability.selected_scale
+    else:
+        applied_scale = requested_scale
 
     combined_decay = (
         parallel.sum(axis=(0, 1)) / settings['parallel_exposure']
-        + 2.0 * settings['g_factor'] * perpendicular.sum(axis=(0, 1))
+        + 2.0 * applied_scale * perpendicular.sum(axis=(0, 1))
         / settings['perpendicular_exposure'])
     peak_bin = int(np.argmax(combined_decay))
     time_relative = time_ns - time_ns[peak_bin]
@@ -713,13 +951,15 @@ def run_analysis(settings):
     result = analyze_anisotropy(
         parallel, perpendicular, time_ns,
         background_bins=settings['background_bins'],
-        analysis_bins=analysis_bins, g_factor=settings['g_factor'],
+        analysis_bins=analysis_bins, g_factor=applied_scale,
         spatial_window=settings['spatial_window'], stride=settings['stride'],
         min_bin_photons=settings['min_bin_photons'],
         min_map_photons=settings['min_map_photons'],
         perpendicular_shift=shift_yx,
         parallel_exposure=settings['parallel_exposure'],
         perpendicular_exposure=settings['perpendicular_exposure'])
+    result.g_factor = applied_scale
+    result.late_window_stability = late_window_stability
     if analysis_mode == 'global':
         assert global_fit_bins is not None
         assert repetition_period_ns is not None
@@ -738,7 +978,7 @@ def run_analysis(settings):
             fit_time_ns, parallel_irf=parallel_irf,
             perpendicular_irf=perpendicular_irf,
             intensity_lifetime_ns=settings['fixed_lifetime_ns'],
-            g_factor=settings['g_factor'],
+            g_factor=applied_scale,
             parallel_exposure=settings['parallel_exposure'],
             perpendicular_exposure=settings['perpendicular_exposure'],
             initial_parallel_background=result.parallel_background,
@@ -759,7 +999,30 @@ def run_analysis(settings):
         'min_map_photons': settings['min_map_photons'],
         'auto_registration': settings['auto_register'],
         'analysis_mode': analysis_mode,
+        'shared_scale_source': scale_source,
+        'shared_scale_interpretation': interpretations[scale_source],
+        'requested_shared_scale': requested_scale,
+        'applied_shared_scale': applied_scale,
+        'late_window_requested_start_ns': settings.get(
+            'late_window_start_ns', float(time_ns[0])),
+        'late_window_diagnostic_available': late_window_stability is not None,
+        'late_window_diagnostic_error': diagnostic_error or '',
+        'late_window_background_treatment': 'none',
+        'late_window_previous_pulse_fluorescence_included': True,
     })
+    if late_window_stability is not None:
+        result.metadata.update({
+            'late_window_selected_start_ns': float(
+                late_window_stability.time_ns[
+                    late_window_stability.selected_start_bin]),
+            'late_window_parallel_photons': (
+                late_window_stability.selected_parallel_photons),
+            'late_window_perpendicular_photons': (
+                late_window_stability.selected_perpendicular_photons),
+            'late_window_poisson_standard_error': float(
+                late_window_stability.nested_standard_error[
+                    late_window_stability.selected_start_bin]),
+        })
     if analysis_mode == 'global':
         result.metadata.update({
             'parallel_irf_file': Path(settings['parallel_irf_path']).name,
