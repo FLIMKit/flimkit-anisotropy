@@ -16,6 +16,24 @@ def _spreadsheet_safe(value):
     return value
 
 
+def _advanced_model_description(selection_mode, max_components):
+    if selection_mode == 'fixed_k':
+        return (
+            'fixed single fluorescence lifetime; fixed-K expert rotational '
+            'correlations; no cross-K BIC selection')
+    if max_components == 1:
+        return (
+            'fixed single fluorescence lifetime; K1 rotational-correlation '
+            'model; no cross-K BIC selection')
+    return (
+        'fixed single fluorescence lifetime; compared ordered '
+        f'K1-K{max_components} rotational-correlation models')
+
+
+def _uses_cross_k_bic(selection_mode, max_components):
+    return selection_mode == 'bic_comparison' and max_components > 1
+
+
 class AnisotropyTool(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -43,9 +61,14 @@ class AnisotropyTool(tk.Toplevel):
         self.late_window_start_ns = tk.DoubleVar(value=9.6)
         self.max_components = tk.IntVar(value=1)
         self.multistart = tk.IntVar(value=6)
+        self.advanced_fit_mode = tk.StringVar(value='Compare K1-Kmax (BIC)')
         self.component_range_mode = tk.StringVar(value='Auto')
-        self.component_lower_ns = [tk.DoubleVar(value=0.2)]
-        self.component_upper_ns = [tk.DoubleVar(value=6.0)]
+        self.shared_component_lower_ns = tk.DoubleVar(value=0.2)
+        self.shared_component_upper_ns = tk.DoubleVar(value=6.0)
+        self.component_lower_ns = [
+            tk.DoubleVar(value=value) for value in (0.2, 1.5, 3.5)]
+        self.component_upper_ns = [
+            tk.DoubleVar(value=value) for value in (1.0, 3.0, 6.0)]
         self.parallel_exposure = tk.DoubleVar(value=1.0)
         self.perpendicular_exposure = tk.DoubleVar(value=1.0)
         self.parallel_channel = tk.IntVar(value=0)
@@ -166,46 +189,72 @@ class AnisotropyTool(tk.Toplevel):
         self.advanced_settings_frame = advanced
         advanced.grid(
             row=6, column=0, columnspan=3, sticky='ew', pady=(8, 0))
-        ttk.Label(advanced, text='Maximum components').grid(
+        ttk.Label(advanced, text='Fit mode').grid(
             row=0, column=0, sticky='w', padx=(0, 4))
+        ttk.Combobox(
+            advanced, textvariable=self.advanced_fit_mode, state='readonly',
+            values=('Compare K1-Kmax (BIC)', 'Fixed K expert'), width=23).grid(
+                row=0, column=1, columnspan=2, sticky='w', padx=(0, 14))
+        ttk.Label(advanced, text='Components / K max').grid(
+            row=0, column=3, sticky='w', padx=(0, 4))
         ttk.Combobox(
             advanced, textvariable=self.max_components, state='readonly',
             values=('1', '2', '3'), width=5).grid(
-                row=0, column=1, sticky='w', padx=(0, 14))
-        ttk.Label(advanced, text='Deterministic starts').grid(
-            row=0, column=2, sticky='w', padx=(0, 4))
+                row=0, column=4, sticky='w', padx=(0, 14))
+        ttk.Label(advanced, text='Starts').grid(
+            row=0, column=5, sticky='w', padx=(0, 4))
         ttk.Entry(advanced, textvariable=self.multistart, width=6).grid(
-            row=0, column=3, sticky='w', padx=(0, 14))
-        ttk.Label(advanced, text='Bounds mode').grid(
-            row=0, column=4, sticky='w', padx=(0, 4))
-        ttk.Combobox(
+            row=0, column=6, sticky='w')
+
+        ttk.Label(advanced, text='Comparison bounds').grid(
+            row=1, column=0, sticky='w', padx=(0, 4), pady=(4, 0))
+        self.component_range_combo = ttk.Combobox(
             advanced, textvariable=self.component_range_mode, state='readonly',
-            values=('Auto', 'Manual'), width=9).grid(
-                row=0, column=5, sticky='w')
-        self.component_bound_entries = []
-        ttk.Label(advanced, text='Shared time range').grid(
-            row=1, column=0, sticky='w', pady=(3, 0))
-        ttk.Label(advanced, text='lower ns').grid(
-            row=1, column=1, sticky='e', pady=(3, 0))
+            values=('Auto', 'Manual'), width=9)
+        self.component_range_combo.grid(
+            row=1, column=1, sticky='w', pady=(4, 0))
+        ttk.Label(advanced, text='shared lower ns').grid(
+            row=1, column=2, sticky='e', pady=(4, 0))
         lower_entry = ttk.Entry(
-            advanced, textvariable=self.component_lower_ns[0], width=7)
+            advanced, textvariable=self.shared_component_lower_ns, width=7)
         lower_entry.grid(
-            row=1, column=2, sticky='w', padx=(4, 12), pady=(3, 0))
+            row=1, column=3, sticky='w', padx=(4, 12), pady=(4, 0))
         ttk.Label(advanced, text='upper ns').grid(
-            row=1, column=3, sticky='e', pady=(3, 0))
+            row=1, column=4, sticky='e', pady=(4, 0))
         upper_entry = ttk.Entry(
-            advanced, textvariable=self.component_upper_ns[0], width=7)
+            advanced, textvariable=self.shared_component_upper_ns, width=7)
         upper_entry.grid(
-            row=1, column=4, sticky='w', padx=(4, 12), pady=(3, 0))
-        self.component_bound_entries.extend((lower_entry, upper_entry))
-        g_hint = (
-            'Manual mode applies this same range to every candidate. '
-            'G defaults to 1. For a better G guess, first use the effective '
-            'late-window scale feature. That estimate is effective, not calibrated.')
+            row=1, column=5, sticky='w', padx=(4, 12), pady=(4, 0))
+        self.component_bound_entries = [lower_entry, upper_entry]
+
+        ttk.Label(advanced, text='Fixed-K component').grid(
+            row=2, column=0, sticky='w', pady=(6, 0))
+        ttk.Label(advanced, text='lower ns').grid(
+            row=2, column=2, sticky='e', pady=(6, 0))
+        ttk.Label(advanced, text='upper ns').grid(
+            row=2, column=4, sticky='e', pady=(6, 0))
+        self.per_component_bound_entries = []
+        for index in range(3):
+            ttk.Label(advanced, text=f'Exp {index + 1}').grid(
+                row=3 + index, column=0, sticky='w', pady=(2, 0))
+            component_lower = ttk.Entry(
+                advanced, textvariable=self.component_lower_ns[index], width=7)
+            component_lower.grid(
+                row=3 + index, column=3, sticky='w', padx=(4, 12),
+                pady=(2, 0))
+            component_upper = ttk.Entry(
+                advanced, textvariable=self.component_upper_ns[index], width=7)
+            component_upper.grid(
+                row=3 + index, column=5, sticky='w', padx=(4, 12),
+                pady=(2, 0))
+            self.per_component_bound_entries.append(
+                (component_lower, component_upper))
+
+        self.advanced_mode_hint = tk.StringVar()
         ttk.Label(
-            advanced, text=g_hint, foreground='#555555', wraplength=940,
-            justify='left').grid(
-                row=2, column=0, columnspan=6, sticky='w', pady=(6, 0))
+            advanced, textvariable=self.advanced_mode_hint,
+            foreground='#555555', wraplength=940, justify='left').grid(
+                row=6, column=0, columnspan=7, sticky='w', pady=(6, 0))
 
         note = ('File roles are explicit; FLIMKit does not infer them from names. '
                 'G=1 is an assumption unless calibrated independently. An '
@@ -214,6 +263,10 @@ class AnisotropyTool(tk.Toplevel):
             row=7, column=0, columnspan=3, sticky='w', pady=(6, 0))
         self.analysis_mode.trace_add('write', self._update_advanced_controls)
         self.component_range_mode.trace_add(
+            'write', self._update_component_range_controls)
+        self.advanced_fit_mode.trace_add(
+            'write', self._update_component_range_controls)
+        self.max_components.trace_add(
             'write', self._update_component_range_controls)
         self._update_advanced_controls()
         self._update_component_range_controls()
@@ -225,11 +278,30 @@ class AnisotropyTool(tk.Toplevel):
             self.advanced_settings_frame.grid_remove()
 
     def _update_component_range_controls(self, *_args):
-        state = (
-            'normal' if self.component_range_mode.get() == 'Manual'
+        fixed_k = self.advanced_fit_mode.get() == 'Fixed K expert'
+        self.component_range_combo.configure(
+            state='disabled' if fixed_k else 'readonly')
+        shared_state = (
+            'normal' if (not fixed_k
+                         and self.component_range_mode.get() == 'Manual')
             else 'disabled')
         for entry in self.component_bound_entries:
-            entry.configure(state=state)
+            entry.configure(state=shared_state)
+        selected_count = self.max_components.get()
+        for index, entries in enumerate(self.per_component_bound_entries):
+            state = 'normal' if fixed_k and index < selected_count else 'disabled'
+            for entry in entries:
+                entry.configure(state=state)
+        if fixed_k:
+            self.advanced_mode_hint.set(
+                'Fixed-K expert mode fits only the chosen K. Set one positive, '
+                'ordered, non-overlapping range per exponential component. '
+                'No cross-K BIC comparison is performed.')
+        else:
+            self.advanced_mode_hint.set(
+                'Comparison mode fits K1 through K max. Manual mode applies one '
+                'shared range to every candidate. For a better G guess, first '
+                'use the effective late-window scale; it is not calibrated G.')
 
     def _toggle_inputs(self):
         self._set_inputs_visible(not bool(self.input_panel.winfo_manager()))
@@ -365,14 +437,28 @@ class AnisotropyTool(tk.Toplevel):
         canvas.get_tk_widget().pack(fill='both', expand=True)
         canvas.draw_idle()
 
-        component_lines = [
-            f'BIC-selected model: {comparison.selected_component_count} components',
-            '',
-        ]
+        fixed_k = getattr(
+            comparison, 'selection_mode', 'bic_comparison') == 'fixed_k'
+        if fixed_k:
+            component_lines = [
+                f'Fixed K{comparison.selected_component_count} expert fit',
+                'No cross-K BIC selection',
+                '',
+            ]
+        else:
+            component_lines = [
+                (f'BIC-selected model: {comparison.selected_component_count} '
+                 'components'),
+                '',
+            ]
         for candidate in comparison.candidates:
             state = 'RESOLVED' if candidate.identifiable else 'NOT RESOLVED'
+            candidate_label = (
+                f'K{candidate.component_count} numerical diagnostics'
+                if fixed_k
+                else f'{candidate.component_count}-component candidate')
             component_lines.append(
-                f'{candidate.component_count}-component candidate — '
+                f'{candidate_label} — '
                 f'BIC {candidate.bic:.6g}; AICc {candidate.aicc:.6g}; {state}')
             for index, (correlation_time, weight) in enumerate(zip(
                     candidate.rotational_correlation_times_ns,
@@ -628,16 +714,45 @@ class AnisotropyTool(tk.Toplevel):
         range_mode = self.component_range_mode.get()
         if range_mode not in {'Auto', 'Manual'}:
             raise ValueError('Choose Auto or Manual component time ranges')
+        advanced_fit_modes = {
+            'Compare K1-Kmax (BIC)': 'bic_comparison',
+            'Fixed K expert': 'fixed_k',
+        }
+        advanced_fit_mode = advanced_fit_modes.get(self.advanced_fit_mode.get())
+        if advanced_fit_mode is None:
+            raise ValueError('Choose model comparison or Fixed K expert mode')
+        fixed_component_count = None
         component_bounds_ns = None
-        if analysis_mode == 'advanced' and range_mode == 'Manual':
-            lower = self.component_lower_ns[0].get()
-            upper = self.component_upper_ns[0].get()
+        if analysis_mode == 'advanced' and advanced_fit_mode == 'fixed_k':
+            fixed_component_count = max_components
+            bounds = []
+            for index in range(fixed_component_count):
+                lower = self.component_lower_ns[index].get()
+                upper = self.component_upper_ns[index].get()
+                if (not np.isfinite(lower) or not np.isfinite(upper)
+                        or lower <= 0 or lower >= upper):
+                    raise ValueError(
+                        f'Exp {index + 1} range must contain positive '
+                        'increasing bounds')
+                bounds.append((float(lower), float(upper)))
+            if any(bounds[index][1] > bounds[index + 1][0]
+                   for index in range(len(bounds) - 1)):
+                raise ValueError(
+                    'Fixed-K component ranges must be ordered and non-overlapping')
+            component_bounds_ns = tuple(bounds)
+            range_mode_value = 'per-component'
+        elif analysis_mode == 'advanced' and range_mode == 'Manual':
+            lower = self.shared_component_lower_ns.get()
+            upper = self.shared_component_upper_ns.get()
             if (not np.isfinite(lower) or not np.isfinite(upper)
                     or lower <= 0 or lower >= upper):
                 raise ValueError(
                     'Manual shared time range must contain positive increasing '
                     'bounds')
             component_bounds_ns = (float(lower), float(upper))
+            range_mode_value = 'manual'
+        else:
+            range_mode_value = range_mode.lower()
         fit_mode = analysis_mode in {'global', 'advanced'}
         return {
             'parallel_path': parallel,
@@ -647,8 +762,10 @@ class AnisotropyTool(tk.Toplevel):
             'perpendicular_irf_path': perpendicular_irf if fit_mode else None,
             'fixed_lifetime_ns': fixed_lifetime_ns,
             'max_components': max_components,
+            'fixed_component_count': fixed_component_count,
+            'advanced_fit_mode': advanced_fit_mode,
             'multistart': multistart,
-            'component_range_mode': range_mode.lower(),
+            'component_range_mode': range_mode_value,
             'component_bounds_ns': component_bounds_ns,
             'g_factor': g_factor,
             'g_mode': g_mode,
@@ -761,11 +878,26 @@ class AnisotropyTool(tk.Toplevel):
         comparison = getattr(result, 'multicomponent_fit', None)
         if comparison is not None:
             if comparison.selected_fit is None:
-                status += ' No optimizer candidate converged. NOT RESOLVED.'
+                if (getattr(
+                        comparison, 'selection_mode', 'bic_comparison')
+                        == 'fixed_k'):
+                    status += (
+                        f' Fixed K{comparison.max_components} expert fit; '
+                        'no cross-K BIC selection. No optimizer candidate '
+                        'converged. NOT RESOLVED.')
+                else:
+                    status += ' No optimizer candidate converged. NOT RESOLVED.'
             else:
-                status += (
-                    f' BIC-selected {comparison.selected_component_count}-component '
-                    'model.')
+                if (getattr(
+                        comparison, 'selection_mode', 'bic_comparison')
+                        == 'fixed_k'):
+                    status += (
+                        f' Fixed K{comparison.selected_component_count} expert fit; '
+                        'no cross-K BIC selection.')
+                else:
+                    status += (
+                        f' BIC-selected '
+                        f'{comparison.selected_component_count}-component model.')
             if (comparison.selected_fit is not None
                     and not comparison.selected_fit.identifiable):
                 status += ' WARNING: NOT RESOLVED; open Fit details.'
@@ -840,9 +972,18 @@ class AnisotropyTool(tk.Toplevel):
             self.figure.set_layout_engine('constrained')
             for axis in self.axes.flat:
                 axis.set_axis_off()
+            if (getattr(
+                    comparison, 'selection_mode', 'bic_comparison')
+                    == 'fixed_k'):
+                failure_text = (
+                    f'Fixed K{comparison.max_components} expert fit\n'
+                    'No cross-K BIC selection\n'
+                    'No optimizer candidate converged\nNOT RESOLVED')
+            else:
+                failure_text = (
+                    'No optimizer candidate converged\nNOT RESOLVED')
             self.axes[0, 0].text(
-                0.5, 0.5,
-                'No optimizer candidate converged\nNOT RESOLVED',
+                0.5, 0.5, failure_text,
                 ha='center', va='center', color='#b00020', fontsize=14,
                 transform=self.axes[0, 0].transAxes)
             self._style_plot_text()
@@ -888,16 +1029,29 @@ class AnisotropyTool(tk.Toplevel):
         self.axes[1, 0].tick_params(labelsize=8)
         self.axes[1, 0].legend(fontsize=8)
 
-        summary_lines = [
-            'Advanced anisotropy model comparison',
-            f'Fixed fluorescence lifetime: {fit.intensity_lifetime_ns:.4g} ns',
-            f'BIC-selected model: {comparison.selected_component_count} components',
-        ]
+        fixed_k = getattr(
+            comparison, 'selection_mode', 'bic_comparison') == 'fixed_k'
+        if fixed_k:
+            summary_lines = [
+                'Advanced fixed-K expert fit',
+                f'Fixed fluorescence lifetime: {fit.intensity_lifetime_ns:.4g} ns',
+                f'Fixed K{comparison.selected_component_count} expert fit',
+                'No cross-K BIC selection',
+            ]
+        else:
+            summary_lines = [
+                'Advanced anisotropy model comparison',
+                f'Fixed fluorescence lifetime: {fit.intensity_lifetime_ns:.4g} ns',
+                (f'BIC-selected model: {comparison.selected_component_count} '
+                 'components'),
+            ]
         for candidate in comparison.candidates:
             state = 'resolved' if candidate.identifiable else 'not resolved'
+            prefix = (
+                f'K{candidate.component_count} numerical diagnostics'
+                if fixed_k else f'{candidate.component_count}-component')
             summary_lines.append(
-                f'{candidate.component_count}-component: '
-                f'BIC {candidate.bic:.4g} ({state})')
+                f'{prefix}: BIC {candidate.bic:.4g} ({state})')
         if fit.identifiable:
             summary_lines.append(
                 f'Time-zero anisotropy r(0): {fit.initial_anisotropy:.4g}')
@@ -1124,6 +1278,9 @@ class AnisotropyTool(tk.Toplevel):
                 'advanced_max_components': comparison.max_components,
                 'advanced_selected_component_count': (
                     comparison.selected_component_count),
+                'advanced_selection_mode': comparison.selection_mode,
+                'advanced_cross_k_bic_selection': _uses_cross_k_bic(
+                    comparison.selection_mode, comparison.max_components),
                 'advanced_residual_type': 'signed_poisson_deviance',
             })
             for candidate in comparison.candidates:
@@ -1474,6 +1631,7 @@ def run_analysis(settings):
             result.multicomponent_fit = fit_multicomponent_polarized_decays(
                 *fit_arguments, **fit_keywords,
                 max_components=settings.get('max_components', 1),
+                fixed_component_count=settings.get('fixed_component_count'),
                 multistart=settings.get('multistart', 6),
                 component_bounds_ns=settings.get('component_bounds_ns'))
     result.metadata.update({
@@ -1530,16 +1688,40 @@ def run_analysis(settings):
             'fixed single fluorescence lifetime; '
             'single rotational correlation')
     elif analysis_mode == 'advanced':
+        comparison = result.multicomponent_fit
+        if comparison is None:
+            raise RuntimeError(
+                'advanced analysis did not produce a multicomponent fit')
+        advanced_fit_mode = comparison.selection_mode
+        fixed_k = advanced_fit_mode == 'fixed_k'
+        actual_fixed_component_count = (
+            comparison.max_components if fixed_k else None)
+        actual_component_range_mode = (
+            'per-component' if fixed_k
+            else ('manual' if settings.get('component_bounds_ns') is not None
+                  else 'auto'))
+        candidates = getattr(comparison, 'candidates', ())
+        if candidates:
+            candidate_bounds = np.asarray(
+                candidates[0].component_bounds_ns, dtype=float)
+            actual_component_bounds = (
+                candidate_bounds.tolist() if fixed_k
+                else candidate_bounds[0].tolist())
+        else:
+            actual_component_bounds = (
+                settings.get('component_bounds_ns') or [])
+        model_description = _advanced_model_description(
+            advanced_fit_mode, comparison.max_components)
         result.metadata.update({
-            'global_fit_model': (
-                'fixed single fluorescence lifetime; compared ordered '
-                'one-to-three-component rotational correlations'),
-            'advanced_max_components': settings.get('max_components', 1),
+            'global_fit_model': model_description,
+            'advanced_fit_mode': advanced_fit_mode,
+            'advanced_cross_k_bic_selection': _uses_cross_k_bic(
+                advanced_fit_mode, comparison.max_components),
+            'advanced_fixed_component_count': actual_fixed_component_count,
+            'advanced_max_components': comparison.max_components,
             'advanced_multistart': settings.get('multistart', 6),
-            'advanced_component_range_mode': settings.get(
-                'component_range_mode', 'auto'),
-            'advanced_component_bounds_ns': settings.get(
-                'component_bounds_ns') or [],
+            'advanced_component_range_mode': actual_component_range_mode,
+            'advanced_component_bounds_ns': actual_component_bounds,
         })
     return result, peak_bin
 

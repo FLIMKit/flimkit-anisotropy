@@ -97,12 +97,15 @@ class MulticomponentFitResult:
     max_components: int
     selected_component_count: int
     candidates: tuple
+    selection_mode: str = 'bic_comparison'
 
     @property
     def selected_fit(self):
         if self.selected_component_count == 0:
             return None
-        return self.candidates[self.selected_component_count - 1]
+        return next(
+            candidate for candidate in self.candidates
+            if candidate.component_count == self.selected_component_count)
 
     @property
     def has_resolved_model(self):
@@ -627,11 +630,17 @@ def fit_multicomponent_polarized_decays(
         initial_perpendicular_background=0.0, repetition_period_ns=None,
         fit_bins=None, max_components=3, multistart=6,
         rotational_bounds_ns=None, component_bounds_ns=None,
+        fixed_component_count=None,
         initial_anisotropy=0.2, anisotropy_bounds=(-0.2, 0.4),
         common_shift_bounds_bins=(-2.0, 2.0)):
     if (not isinstance(max_components, (int, np.integer))
             or not 1 <= max_components <= 3):
         raise ValueError('max_components must be between one and three')
+    if (fixed_component_count is not None
+            and (isinstance(fixed_component_count, (bool, np.bool_))
+                 or not isinstance(fixed_component_count, (int, np.integer))
+                 or not 1 <= fixed_component_count <= 3)):
+        raise ValueError('fixed_component_count must be 1, 2, or 3')
     if (not isinstance(multistart, (int, np.integer))
             or not 1 <= multistart <= 32):
         raise ValueError('multistart must be between 1 and at most 32')
@@ -689,16 +698,33 @@ def fit_multicomponent_polarized_decays(
     rotational_bounds_ns = tuple(float(value) for value in rotational_bounds_ns)
 
     fit_bounds_ns = rotational_bounds_ns
-    if component_bounds_ns is not None:
-        shared_bounds = np.asarray(component_bounds_ns, dtype=float)
-        if (shared_bounds.shape != (2,)
-                or np.any(~np.isfinite(shared_bounds))
-                or np.any(shared_bounds <= 0)
-                or shared_bounds[0] >= shared_bounds[1]):
+    component_specific_bounds = None
+    if fixed_component_count is not None:
+        supplied_bounds = np.asarray(component_bounds_ns, dtype=float)
+        if supplied_bounds.shape != (fixed_component_count, 2):
             raise ValueError(
-                'component_bounds_ns must contain one positive increasing '
-                'lower/upper range shared by every candidate')
-        fit_bounds_ns = tuple(float(value) for value in shared_bounds)
+                'fixed-K mode requires exactly one range per component')
+        if (np.any(~np.isfinite(supplied_bounds))
+                or np.any(supplied_bounds <= 0)
+                or np.any(supplied_bounds[:, 0] >= supplied_bounds[:, 1])
+                or np.any(supplied_bounds[:-1, 1]
+                          > supplied_bounds[1:, 0])):
+            raise ValueError(
+                'fixed-K component bounds must be positive, increasing, '
+                'ordered, and non-overlapping')
+        component_specific_bounds = supplied_bounds.copy()
+    elif component_bounds_ns is not None:
+        supplied_bounds = np.asarray(component_bounds_ns, dtype=float)
+        if supplied_bounds.shape != (2,):
+            raise ValueError(
+                'component_bounds_ns must be one shared lower/upper range; '
+                'per-component ranges require fixed-K mode')
+        if (np.any(~np.isfinite(supplied_bounds))
+                or np.any(supplied_bounds <= 0)
+                or supplied_bounds[0] >= supplied_bounds[1]):
+            raise ValueError(
+                'component_bounds_ns must contain positive increasing bounds')
+        fit_bounds_ns = tuple(float(value) for value in supplied_bounds)
 
     corrected_total = (
         (parallel - initial_parallel_background) / parallel_exposure
@@ -708,7 +734,10 @@ def fit_multicomponent_polarized_decays(
     initial_amplitude = max(float(np.max(corrected_total)), 1.0)
     max_background = max(
         float(np.max(parallel)), float(np.max(perpendicular)), 1.0) * 10.0
-    rng = np.random.default_rng(7300 + max_components)
+    random_component_count = (
+        fixed_component_count
+        if fixed_component_count is not None else max_components)
+    rng = np.random.default_rng(7300 + random_component_count)
     observations = selected_parallel.size + selected_perpendicular.size
     irf_resolution_ns = max(
         _irf_fwhm_ns(parallel_irf, bin_width_ns),
@@ -724,9 +753,16 @@ def fit_multicomponent_polarized_decays(
         contribution = np.maximum(2.0 * contribution, 0.0)
         return np.sign(expected - observed) * np.sqrt(contribution)
 
-    for component_count in range(1, max_components + 1):
-        candidate_bounds = np.tile(
-            np.asarray(fit_bounds_ns), (component_count, 1))
+    candidate_counts = (
+        (int(fixed_component_count),)
+        if fixed_component_count is not None
+        else range(1, max_components + 1))
+    for component_count in candidate_counts:
+        if component_specific_bounds is None:
+            candidate_bounds = np.tile(
+                np.asarray(fit_bounds_ns), (component_count, 1))
+        else:
+            candidate_bounds = component_specific_bounds.copy()
         time_parameter_count = component_count
         weight_parameter_count = max(0, component_count - 1)
         shape_parameter_count = time_parameter_count + weight_parameter_count
@@ -735,10 +771,16 @@ def fit_multicomponent_polarized_decays(
         def unpack(
                 parameters, component_count=component_count,
                 fit_bounds_ns=fit_bounds_ns,
+                candidate_bounds=candidate_bounds,
+                use_component_bounds=component_specific_bounds is not None,
                 shape_parameter_count=shape_parameter_count,
                 nuisance_start=nuisance_start):
-            correlation_times = _automatic_component_times(
-                parameters, component_count, fit_bounds_ns)
+            if use_component_bounds:
+                correlation_times = _manual_component_times(
+                    parameters[:component_count], candidate_bounds)
+            else:
+                correlation_times = _automatic_component_times(
+                    parameters, component_count, fit_bounds_ns)
             if component_count == 1:
                 weights = np.ones(1, dtype=float)
             else:
@@ -922,7 +964,7 @@ def fit_multicomponent_polarized_decays(
             warnings.append('component time reached a bound')
         if times[0] < irf_resolution_ns:
             warnings.append('fastest component is below the IRF resolution')
-        if times[-1] >= 0.95 * fit_bounds_ns[1]:
+        if times[-1] >= 0.95 * candidate_bounds[-1, 1]:
             warnings.append('slowest component reached the observation bound')
         competitive = [
             unpack(solution.x) for other_deviance, solution in solutions
@@ -967,23 +1009,31 @@ def fit_multicomponent_polarized_decays(
     eligible_candidates = [
         candidate for candidate in candidates
         if candidate.eligible_for_selection]
-    if eligible_candidates:
-        best_bic = min(candidate.bic for candidate in eligible_candidates)
-        selected_component_count = next(
-            candidate.component_count for candidate in eligible_candidates
-            if candidate.bic <= best_bic + 2.0)
+    if fixed_component_count is not None:
+        selected_component_count = (
+            int(fixed_component_count) if eligible_candidates else 0)
+        selection_mode = 'fixed_k'
     else:
-        selected_component_count = 0
-    for candidate in candidates:
-        if (candidate.eligible_for_selection
-                and candidate.component_count > selected_component_count > 0):
-            candidate.identifiability_warnings += (
-                'simpler model preferred by BIC',)
-            candidate.identifiable = False
+        selection_mode = 'bic_comparison'
+        if eligible_candidates:
+            best_bic = min(candidate.bic for candidate in eligible_candidates)
+            selected_component_count = next(
+                candidate.component_count for candidate in eligible_candidates
+                if candidate.bic <= best_bic + 2.0)
+        else:
+            selected_component_count = 0
+        for candidate in candidates:
+            if (candidate.eligible_for_selection
+                    and candidate.component_count > selected_component_count > 0):
+                candidate.identifiability_warnings += (
+                    'simpler model preferred by BIC',)
+                candidate.identifiable = False
     return MulticomponentFitResult(
-        max_components=int(max_components),
+        max_components=int(
+            fixed_component_count
+            if fixed_component_count is not None else max_components),
         selected_component_count=int(selected_component_count),
-        candidates=tuple(candidates))
+        candidates=tuple(candidates), selection_mode=selection_mode)
 
 
 def calculate_late_window_stability(
@@ -1300,6 +1350,10 @@ def save_anisotropy_npz(result, path):
             'advanced_max_components': comparison.max_components,
             'advanced_selected_component_count': (
                 comparison.selected_component_count),
+            'advanced_selection_mode': comparison.selection_mode,
+            'advanced_cross_k_bic_selection': (
+                comparison.selection_mode == 'bic_comparison'
+                and comparison.max_components > 1),
             'advanced_residual_type': 'signed_poisson_deviance',
         })
         for candidate in comparison.candidates:

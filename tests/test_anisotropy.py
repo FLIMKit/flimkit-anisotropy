@@ -415,6 +415,52 @@ def test_manual_bounds_apply_consistently_to_every_candidate():
             np.tile(manual_bounds, (component_count, 1)))
 
 
+def test_multicomponent_result_defaults_to_bic_comparison_mode():
+    from flimkit_anisotropy.anisotropy import MulticomponentFitResult
+
+    result = MulticomponentFitResult(
+        max_components=1, selected_component_count=0, candidates=())
+
+    assert result.selection_mode == 'bic_comparison'
+
+
+def test_fixed_k_uses_one_bound_range_per_exponential_component():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth([0.55, 3.5], [0.4, 0.6], seed=31))
+    component_bounds = np.array([[0.2, 1.0], [1.5, 8.0]])
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=12.8,
+        max_components=3, fixed_component_count=2, multistart=3,
+        component_bounds_ns=component_bounds)
+
+    assert result.selection_mode == 'fixed_k'
+    assert result.max_components == 2
+    assert result.selected_component_count == 2
+    assert len(result.candidates) == 1
+    assert result.selected_fit is result.candidates[0]
+    assert result.selected_fit.component_count == 2
+    np.testing.assert_allclose(
+        result.selected_fit.component_bounds_ns, component_bounds)
+    assert 0.2 <= result.selected_fit.rotational_correlation_times_ns[0] <= 1.0
+    assert 1.5 <= result.selected_fit.rotational_correlation_times_ns[1] <= 8.0
+
+
+def test_fixed_k_touching_ranges_still_produce_strictly_ordered_times():
+    from flimkit_anisotropy.anisotropy import _manual_component_times
+
+    bounds = np.array([[0.1, 0.8], [0.8, 2.0], [2.0, 10.0]])
+    for parameters in (
+            np.full(3, -8.0), np.zeros(3), np.full(3, 8.0)):
+        times = _manual_component_times(parameters, bounds)
+        assert np.all(np.diff(times) > 0)
+        assert np.all(times > bounds[:, 0])
+        assert np.all(times < bounds[:, 1])
+
+
 def test_multicomponent_fit_rejects_spurious_extra_components():
     from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
 
@@ -457,6 +503,39 @@ def test_multicomponent_fit_validates_component_controls():
         fit_multicomponent_polarized_decays(
             observed, observed, time_ns, irf, irf,
             intensity_lifetime_ns=3.0, max_components=2, multistart=33)
+    with pytest.raises(ValueError, match='fixed_component_count'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=4)
+    with pytest.raises(ValueError, match='fixed_component_count'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=True,
+            component_bounds_ns=((0.2, 4.0),))
+    with pytest.raises(ValueError, match='fixed-K mode'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0,
+            component_bounds_ns=((0.2, 0.8), (1.0, 4.0)))
+    with pytest.raises(ValueError, match='exactly one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2)
+    with pytest.raises(ValueError, match='exactly one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2,
+            component_bounds_ns=(0.2, 4.0))
+    with pytest.raises(ValueError, match='ordered, and non-overlapping'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2,
+            component_bounds_ns=((0.2, 2.0), (1.0, 4.0)))
+    with pytest.raises(ValueError, match='one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=3,
+            component_bounds_ns=((0.2, 0.8), (1.0, 4.0)))
 
 
 def test_periodic_delta_irf_shift_is_defined_across_optimizer_bounds():
@@ -1066,7 +1145,9 @@ def test_save_anisotropy_npz_preserves_all_multicomponent_candidates(tmp_path):
     comparison = fit_multicomponent_polarized_decays(
         parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
         intensity_lifetime_ns=3.0, g_factor=1.35,
-        repetition_period_ns=12.8, max_components=2, multistart=4)
+        repetition_period_ns=12.8, max_components=2,
+        fixed_component_count=2, multistart=4,
+        component_bounds_ns=((0.2, 0.9), (1.1, 6.0)))
     result = analyze_anisotropy(
         parallel[None, None, :], perpendicular[None, None, :], time_ns,
         background_bins=slice(0, 2), analysis_bins=slice(0, 40),
@@ -1078,7 +1159,9 @@ def test_save_anisotropy_npz_preserves_all_multicomponent_candidates(tmp_path):
         'repetition_period_ns': 12.8,
         'global_fit_bins': 132,
         'analysis_mode': 'advanced',
-        'advanced_component_range_mode': 'auto',
+        'advanced_fit_mode': 'fixed_k',
+        'advanced_fixed_component_count': 2,
+        'advanced_component_range_mode': 'per-component',
     })
     path = tmp_path / 'advanced.npz'
 
@@ -1087,6 +1170,8 @@ def test_save_anisotropy_npz_preserves_all_multicomponent_candidates(tmp_path):
     saved = np.load(path, allow_pickle=False)
     assert saved['advanced_max_components'].item() == 2
     assert saved['advanced_selected_component_count'].item() == 2
+    assert saved['advanced_selection_mode'].item() == 'fixed_k'
+    assert saved['advanced_cross_k_bic_selection'].item() is False
     for candidate in comparison.candidates:
         prefix = f'advanced_candidate_{candidate.component_count}'
         np.testing.assert_allclose(
