@@ -30,6 +30,7 @@ class AnisotropyResult:
     perpendicular_exposure: float
     metadata: dict = field(default_factory=dict)
     polarized_fit: 'PolarizedFitResult | None' = None
+    multicomponent_fit: 'MulticomponentFitResult | None' = None
     late_window_stability: 'LateWindowStabilityResult | None' = None
 
 
@@ -45,6 +46,75 @@ class LateWindowStabilityResult:
     selected_parallel_photons: float
     selected_perpendicular_photons: float
     interpretation: str = 'effective_late_window_scale'
+
+
+@dataclass
+class MultistartFitRecord:
+    start_index: int
+    parameter_vector: np.ndarray
+    rotational_correlation_times_ns: np.ndarray
+    component_weights: np.ndarray
+    poisson_deviance: float
+    success: bool
+    message: str
+    parameters_at_bounds: tuple
+
+
+@dataclass
+class MulticomponentModelFit:
+    component_count: int
+    rotational_correlation_times_ns: np.ndarray
+    component_weights: np.ndarray
+    intensity_lifetime_ns: float
+    initial_anisotropy: float
+    amplitude: float
+    parallel_model: np.ndarray
+    perpendicular_model: np.ndarray
+    parallel_residual: np.ndarray
+    perpendicular_residual: np.ndarray
+    poisson_deviance: float
+    degrees_of_freedom: int
+    deviance_per_degree_of_freedom: float
+    bic: float
+    aicc: float
+    success: bool
+    message: str
+    parameters_at_bounds: tuple
+    identifiable: bool
+    identifiability_warnings: tuple
+    common_irf_shift_bins: float
+    parallel_background: float
+    perpendicular_background: float
+    component_bounds_ns: np.ndarray
+    multistart_count: int
+    multistart_records: tuple
+    eligible_for_selection: bool
+    parameter_names: tuple
+
+
+@dataclass
+class MulticomponentFitResult:
+    max_components: int
+    selected_component_count: int
+    candidates: tuple
+    selection_mode: str = 'bic_comparison'
+
+    @property
+    def selected_fit(self):
+        if self.selected_component_count == 0:
+            return None
+        return next(
+            candidate for candidate in self.candidates
+            if candidate.component_count == self.selected_component_count)
+
+    @property
+    def has_resolved_model(self):
+        return bool(
+            self.selected_fit is not None and self.selected_fit.identifiable)
+
+    @property
+    def resolved_component_count(self):
+        return self.selected_component_count if self.has_resolved_model else 0
 
 
 @dataclass
@@ -168,6 +238,20 @@ def subtract_background(data, background_bins):
     return corrected, background
 
 
+def _shift_irf_bins(irf, shift_bins, periodic):
+    if shift_bins == 0.0:
+        return irf
+    bins = np.arange(irf.size, dtype=float)
+    source = bins - shift_bins
+    if not periodic:
+        return np.interp(source, bins, irf, left=0.0, right=0.0)
+    source = np.mod(source, irf.size)
+    lower = np.floor(source).astype(int)
+    fraction = source - lower
+    upper = (lower + 1) % irf.size
+    return (1.0 - fraction) * irf[lower] + fraction * irf[upper]
+
+
 def polarized_decay_models(time_ns, parallel_irf, perpendicular_irf,
                              intensity_lifetime_ns,
                              rotational_correlation_ns,
@@ -230,10 +314,9 @@ def polarized_decay_models(time_ns, parallel_irf, perpendicular_irf,
     def convolve(signal, irf):
         irf = normalize_irf(irf)
         if common_irf_shift_bins != 0.0:
-            bins = np.arange(time_ns.size, dtype=float)
-            irf = np.interp(
-                bins - common_irf_shift_bins, bins, irf,
-                left=0.0, right=0.0)
+            irf = _shift_irf_bins(
+                irf, common_irf_shift_bins,
+                periodic=repetition_period_ns is not None)
             irf = normalize_irf(irf)
         if repetition_period_ns is None:
             return np.convolve(signal, irf, mode='full')[:time_ns.size]
@@ -243,6 +326,118 @@ def polarized_decay_models(time_ns, parallel_irf, perpendicular_irf,
     perpendicular_model = convolve(perpendicular_impulse, perpendicular_irf)
     return (parallel_model + parallel_background,
             perpendicular_model + perpendicular_background)
+
+
+def _validate_time_axis(time_ns, minimum_size=2):
+    time_ns = np.asarray(time_ns, dtype=float)
+    if time_ns.ndim != 1 or time_ns.size < minimum_size:
+        raise ValueError(
+            f'time_ns must be one-dimensional with at least {minimum_size} values')
+    if np.any(~np.isfinite(time_ns)):
+        raise ValueError('time_ns must be finite')
+    spacing = np.diff(time_ns)
+    if np.any(spacing <= 0):
+        raise ValueError('time_ns must be strictly increasing')
+    if not np.allclose(
+            spacing, spacing[0], rtol=1e-6,
+            atol=max(np.finfo(float).eps, abs(float(spacing[0])) * 1e-9)):
+        raise ValueError('time_ns must be evenly spaced')
+    return time_ns, spacing
+
+
+def multicomponent_polarized_decay_models(
+        time_ns, parallel_irf, perpendicular_irf, intensity_lifetime_ns,
+        rotational_correlation_times_ns, component_weights,
+        initial_anisotropy, amplitude, g_factor=1.0,
+        parallel_exposure=1.0, perpendicular_exposure=1.0,
+        parallel_background=0.0, perpendicular_background=0.0,
+        repetition_period_ns=None, common_irf_shift_bins=0.0):
+    time_ns, spacing = _validate_time_axis(time_ns)
+    parallel_irf = np.asarray(parallel_irf, dtype=float)
+    perpendicular_irf = np.asarray(perpendicular_irf, dtype=float)
+    correlation_times = np.asarray(
+        rotational_correlation_times_ns, dtype=float)
+    weights = np.asarray(component_weights, dtype=float)
+    if (parallel_irf.shape != time_ns.shape
+            or perpendicular_irf.shape != time_ns.shape):
+        raise ValueError('Each polarization IRF must match time_ns')
+    if correlation_times.ndim != 1 or weights.ndim != 1:
+        raise ValueError('Component times and weights must be one-dimensional')
+    if correlation_times.size != weights.size:
+        raise ValueError('Component times and weights must have the same length')
+    if correlation_times.size < 1 or correlation_times.size > 3:
+        raise ValueError('Choose between one and three anisotropy components')
+    if (np.any(~np.isfinite(correlation_times))
+            or np.any(correlation_times <= 0)):
+        raise ValueError('Component times must be positive and finite')
+    if np.any(np.diff(correlation_times) <= 0):
+        raise ValueError('Component times must be strictly increasing')
+    if np.any(~np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError('Component weights must be finite and non-negative')
+    if not np.isclose(weights.sum(), 1.0, rtol=1e-8, atol=1e-10):
+        raise ValueError('Component weights must sum to one')
+    positive = (intensity_lifetime_ns, amplitude, g_factor,
+                parallel_exposure, perpendicular_exposure)
+    if not np.all(np.isfinite(positive)) or np.any(np.asarray(positive) <= 0):
+        raise ValueError('Lifetimes, amplitude, G, and exposures must be positive and finite')
+    if not np.isfinite(initial_anisotropy):
+        raise ValueError('initial_anisotropy must be finite')
+    backgrounds = (parallel_background, perpendicular_background)
+    if not np.all(np.isfinite(backgrounds)) or np.any(np.asarray(backgrounds) < 0):
+        raise ValueError('Backgrounds must be finite and non-negative')
+    if (repetition_period_ns is not None
+            and (not np.isfinite(repetition_period_ns)
+                 or repetition_period_ns <= 0)):
+        raise ValueError('repetition_period_ns must be positive and finite')
+    if repetition_period_ns is not None:
+        histogram_duration_ns = time_ns.size * float(spacing[0])
+        if not np.isclose(
+                repetition_period_ns, histogram_duration_ns,
+                rtol=1e-6, atol=float(spacing[0]) / 2.0):
+            raise ValueError(
+                'repetition_period_ns must match the TCSPC histogram duration')
+    if not np.isfinite(common_irf_shift_bins):
+        raise ValueError('common_irf_shift_bins must be finite')
+
+    def normalize_irf(irf):
+        if np.any(~np.isfinite(irf)) or np.any(irf < 0) or irf.sum() <= 0:
+            raise ValueError('IRFs must be finite, non-negative, and non-zero')
+        return irf / irf.sum()
+
+    elapsed_ns = time_ns - time_ns[0]
+    intensity = amplitude * np.exp(-elapsed_ns / intensity_lifetime_ns)
+    polarized = np.zeros_like(elapsed_ns)
+    for correlation_time, weight in zip(correlation_times, weights):
+        effective_ns = 1.0 / (
+            1.0 / intensity_lifetime_ns + 1.0 / correlation_time)
+        component = np.exp(-elapsed_ns / effective_ns)
+        if repetition_period_ns is not None:
+            component /= -np.expm1(-repetition_period_ns / effective_ns)
+        polarized += weight * component
+    polarized *= amplitude * initial_anisotropy
+    if repetition_period_ns is not None:
+        intensity /= -np.expm1(
+            -repetition_period_ns / intensity_lifetime_ns)
+    parallel_impulse = parallel_exposure * (
+        intensity + 2.0 * polarized) / 3.0
+    perpendicular_impulse = perpendicular_exposure * (
+        intensity - polarized) / (3.0 * g_factor)
+
+    def convolve(signal, irf):
+        irf = normalize_irf(irf)
+        if common_irf_shift_bins != 0.0:
+            irf = _shift_irf_bins(
+                irf, common_irf_shift_bins,
+                periodic=repetition_period_ns is not None)
+            irf = normalize_irf(irf)
+        if repetition_period_ns is None:
+            return np.convolve(signal, irf, mode='full')[:time_ns.size]
+        return np.real(np.fft.ifft(np.fft.fft(signal) * np.fft.fft(irf)))
+
+    return (
+        convolve(parallel_impulse, parallel_irf) + parallel_background,
+        convolve(perpendicular_impulse, perpendicular_irf)
+        + perpendicular_background)
 
 
 def fit_polarized_decays(parallel, perpendicular, time_ns,
@@ -397,6 +592,448 @@ def fit_polarized_decays(parallel, perpendicular, time_ns,
         common_irf_shift_bins=shift_bins,
         parallel_background=parallel_bg,
         perpendicular_background=perpendicular_bg)
+
+
+def _softmax(values):
+    values = np.asarray(values, dtype=float)
+    shifted = values - np.max(values)
+    exponential = np.exp(shifted)
+    return exponential / exponential.sum()
+
+
+def _automatic_component_times(parameters, count, bounds_ns):
+    gaps = _softmax(np.r_[parameters[:count], 0.0])
+    fractions = np.cumsum(gaps[:-1])
+    lower, upper = bounds_ns
+    return lower + (upper - lower) * fractions
+
+
+def _manual_component_times(parameters, component_bounds_ns):
+    fractions = 1.0 / (1.0 + np.exp(-parameters))
+    return (component_bounds_ns[:, 0]
+            + fractions * (component_bounds_ns[:, 1]
+                           - component_bounds_ns[:, 0]))
+
+
+def _irf_fwhm_ns(irf, bin_width_ns):
+    irf = np.asarray(irf, dtype=float)
+    above_half = np.flatnonzero(irf >= 0.5 * np.max(irf))
+    if above_half.size == 0:
+        return float(bin_width_ns)
+    return float((above_half[-1] - above_half[0] + 1) * bin_width_ns)
+
+
+def fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns, g_factor=1.0, parallel_exposure=1.0,
+        perpendicular_exposure=1.0, initial_parallel_background=0.0,
+        initial_perpendicular_background=0.0, repetition_period_ns=None,
+        fit_bins=None, max_components=3, multistart=6,
+        rotational_bounds_ns=None, component_bounds_ns=None,
+        fixed_component_count=None,
+        initial_anisotropy=0.2, anisotropy_bounds=(-0.2, 0.4),
+        common_shift_bounds_bins=(-2.0, 2.0)):
+    if (not isinstance(max_components, (int, np.integer))
+            or not 1 <= max_components <= 3):
+        raise ValueError('max_components must be between one and three')
+    if (fixed_component_count is not None
+            and (isinstance(fixed_component_count, (bool, np.bool_))
+                 or not isinstance(fixed_component_count, (int, np.integer))
+                 or not 1 <= fixed_component_count <= 3)):
+        raise ValueError('fixed_component_count must be 1, 2, or 3')
+    if (not isinstance(multistart, (int, np.integer))
+            or not 1 <= multistart <= 32):
+        raise ValueError('multistart must be between 1 and at most 32')
+    parallel = np.asarray(parallel, dtype=float)
+    perpendicular = np.asarray(perpendicular, dtype=float)
+    time_ns, spacing = _validate_time_axis(time_ns, minimum_size=3)
+    parallel_irf = np.asarray(parallel_irf, dtype=float)
+    perpendicular_irf = np.asarray(perpendicular_irf, dtype=float)
+    if parallel.shape != time_ns.shape or perpendicular.shape != time_ns.shape:
+        raise ValueError('Polarized decays must match time_ns')
+    if parallel_irf.shape != time_ns.shape or perpendicular_irf.shape != time_ns.shape:
+        raise ValueError('Each polarization IRF must match time_ns')
+    if (np.any(~np.isfinite(parallel)) or np.any(parallel < 0)
+            or np.any(~np.isfinite(perpendicular))
+            or np.any(perpendicular < 0)):
+        raise ValueError('Polarized counts must be finite and non-negative')
+    positive = np.asarray([
+        intensity_lifetime_ns, g_factor, parallel_exposure,
+        perpendicular_exposure], dtype=float)
+    if np.any(~np.isfinite(positive)) or np.any(positive <= 0):
+        raise ValueError('Lifetime, G, and exposures must be positive and finite')
+    initial_backgrounds = np.asarray([
+        initial_parallel_background, initial_perpendicular_background],
+        dtype=float)
+    if np.any(~np.isfinite(initial_backgrounds)) or np.any(initial_backgrounds < 0):
+        raise ValueError('Initial backgrounds must be finite and non-negative')
+    for lower, upper in (anisotropy_bounds, common_shift_bounds_bins):
+        if (not np.isfinite(lower) or not np.isfinite(upper)
+                or lower >= upper):
+            raise ValueError('Fit bounds must be finite and increasing')
+    if not anisotropy_bounds[0] < initial_anisotropy < anisotropy_bounds[1]:
+        raise ValueError('initial_anisotropy must lie inside its bounds')
+    if not common_shift_bounds_bins[0] < 0.0 < common_shift_bounds_bins[1]:
+        raise ValueError('common_shift_bounds_bins must contain zero')
+    if fit_bins is None:
+        fit_bins = slice(None)
+    selected_parallel = _select_time_bins(parallel, fit_bins, 'fit_bins')
+    selected_perpendicular = _select_time_bins(
+        perpendicular, fit_bins, 'fit_bins')
+
+    bin_width_ns = float(spacing[0])
+    duration_ns = (time_ns[-1] - time_ns[0]) + bin_width_ns
+    if rotational_bounds_ns is None:
+        rotational_upper = min(
+            repetition_period_ns / 2.0
+            if repetition_period_ns is not None else duration_ns / 2.0,
+            10.0 * intensity_lifetime_ns)
+        rotational_bounds_ns = (2.0 * bin_width_ns, rotational_upper)
+    if (len(rotational_bounds_ns) != 2
+            or not np.all(np.isfinite(rotational_bounds_ns))
+            or rotational_bounds_ns[0] <= 0
+            or rotational_bounds_ns[0] >= rotational_bounds_ns[1]):
+        raise ValueError(
+            'rotational_bounds_ns must contain positive increasing bounds')
+    rotational_bounds_ns = tuple(float(value) for value in rotational_bounds_ns)
+
+    fit_bounds_ns = rotational_bounds_ns
+    component_specific_bounds = None
+    if fixed_component_count is not None:
+        supplied_bounds = np.asarray(component_bounds_ns, dtype=float)
+        if supplied_bounds.shape != (fixed_component_count, 2):
+            raise ValueError(
+                'fixed-K mode requires exactly one range per component')
+        if (np.any(~np.isfinite(supplied_bounds))
+                or np.any(supplied_bounds <= 0)
+                or np.any(supplied_bounds[:, 0] >= supplied_bounds[:, 1])
+                or np.any(supplied_bounds[:-1, 1]
+                          > supplied_bounds[1:, 0])):
+            raise ValueError(
+                'fixed-K component bounds must be positive, increasing, '
+                'ordered, and non-overlapping')
+        component_specific_bounds = supplied_bounds.copy()
+    elif component_bounds_ns is not None:
+        supplied_bounds = np.asarray(component_bounds_ns, dtype=float)
+        if supplied_bounds.shape != (2,):
+            raise ValueError(
+                'component_bounds_ns must be one shared lower/upper range; '
+                'per-component ranges require fixed-K mode')
+        if (np.any(~np.isfinite(supplied_bounds))
+                or np.any(supplied_bounds <= 0)
+                or supplied_bounds[0] >= supplied_bounds[1]):
+            raise ValueError(
+                'component_bounds_ns must contain positive increasing bounds')
+        fit_bounds_ns = tuple(float(value) for value in supplied_bounds)
+
+    corrected_total = (
+        (parallel - initial_parallel_background) / parallel_exposure
+        + 2.0 * g_factor
+        * (perpendicular - initial_perpendicular_background)
+        / perpendicular_exposure)
+    initial_amplitude = max(float(np.max(corrected_total)), 1.0)
+    max_background = max(
+        float(np.max(parallel)), float(np.max(perpendicular)), 1.0) * 10.0
+    random_component_count = (
+        fixed_component_count
+        if fixed_component_count is not None else max_components)
+    rng = np.random.default_rng(7300 + random_component_count)
+    observations = selected_parallel.size + selected_perpendicular.size
+    irf_resolution_ns = max(
+        _irf_fwhm_ns(parallel_irf, bin_width_ns),
+        _irf_fwhm_ns(perpendicular_irf, bin_width_ns))
+    candidates = []
+
+    def poisson_residual(observed, expected):
+        expected = np.maximum(expected, 1e-12)
+        contribution = expected - observed
+        positive_counts = observed > 0
+        contribution[positive_counts] += observed[positive_counts] * np.log(
+            observed[positive_counts] / expected[positive_counts])
+        contribution = np.maximum(2.0 * contribution, 0.0)
+        return np.sign(expected - observed) * np.sqrt(contribution)
+
+    candidate_counts = (
+        (int(fixed_component_count),)
+        if fixed_component_count is not None
+        else range(1, max_components + 1))
+    for component_count in candidate_counts:
+        if component_specific_bounds is None:
+            candidate_bounds = np.tile(
+                np.asarray(fit_bounds_ns), (component_count, 1))
+        else:
+            candidate_bounds = component_specific_bounds.copy()
+        time_parameter_count = component_count
+        weight_parameter_count = max(0, component_count - 1)
+        shape_parameter_count = time_parameter_count + weight_parameter_count
+        nuisance_start = shape_parameter_count
+
+        def unpack(
+                parameters, component_count=component_count,
+                fit_bounds_ns=fit_bounds_ns,
+                candidate_bounds=candidate_bounds,
+                use_component_bounds=component_specific_bounds is not None,
+                shape_parameter_count=shape_parameter_count,
+                nuisance_start=nuisance_start):
+            if use_component_bounds:
+                correlation_times = _manual_component_times(
+                    parameters[:component_count], candidate_bounds)
+            else:
+                correlation_times = _automatic_component_times(
+                    parameters, component_count, fit_bounds_ns)
+            if component_count == 1:
+                weights = np.ones(1, dtype=float)
+            else:
+                weights = _softmax(np.r_[
+                    parameters[component_count:shape_parameter_count], 0.0])
+            r0, log_amplitude, shift_bins, parallel_bg, perpendicular_bg = (
+                parameters[nuisance_start:nuisance_start + 5])
+            return (
+                correlation_times, weights, float(r0),
+                float(np.exp(log_amplitude)), float(shift_bins),
+                float(parallel_bg), float(perpendicular_bg))
+
+        def models(parameters):
+            times, weights, r0, amplitude, shift_bins, parallel_bg, perpendicular_bg = (
+                unpack(parameters))
+            return multicomponent_polarized_decay_models(
+                time_ns, parallel_irf, perpendicular_irf,
+                intensity_lifetime_ns=intensity_lifetime_ns,
+                rotational_correlation_times_ns=times,
+                component_weights=weights, initial_anisotropy=r0,
+                amplitude=amplitude, g_factor=g_factor,
+                parallel_exposure=parallel_exposure,
+                perpendicular_exposure=perpendicular_exposure,
+                parallel_background=parallel_bg,
+                perpendicular_background=perpendicular_bg,
+                repetition_period_ns=repetition_period_ns,
+                common_irf_shift_bins=shift_bins)
+
+        def residuals(parameters):
+            parallel_model, perpendicular_model = models(parameters)
+            return np.concatenate([
+                poisson_residual(
+                    selected_parallel,
+                    _select_time_bins(parallel_model, fit_bins, 'fit_bins')),
+                poisson_residual(
+                    selected_perpendicular,
+                    _select_time_bins(
+                        perpendicular_model, fit_bins, 'fit_bins')),
+            ])
+
+        lower = np.r_[
+            np.full(shape_parameter_count, -8.0), anisotropy_bounds[0],
+            np.log(1e-12), common_shift_bounds_bins[0], 0.0, 0.0]
+        upper = np.r_[
+            np.full(shape_parameter_count, 8.0), anisotropy_bounds[1],
+            np.log(max(initial_amplitude * 1e6, 1e6)),
+            common_shift_bounds_bins[1], max_background, max_background]
+        parameter_names = (
+            tuple(f'component_time_parameter_{index + 1}'
+                  for index in range(component_count))
+            + tuple(f'component_weight_parameter_{index + 1}'
+                    for index in range(weight_parameter_count))
+            + ('initial_anisotropy', 'log_amplitude',
+               'common_irf_shift_bins',
+               'parallel_background', 'perpendicular_background'))
+        solutions = []
+        start_records = []
+        for start_index in range(multistart):
+            time_start = np.linspace(-1.5, 1.5, component_count)
+            weight_start = np.zeros(weight_parameter_count)
+            if start_index:
+                time_start += rng.normal(0.0, 1.2, component_count)
+                weight_start += rng.normal(0.0, 0.8, weight_parameter_count)
+            initial = np.r_[
+                time_start, weight_start, initial_anisotropy,
+                np.log(initial_amplitude), 0.0, initial_backgrounds]
+            initial = np.minimum(
+                np.maximum(initial, lower + 1e-9), upper - 1e-9)
+            try:
+                fitted_start = least_squares(
+                    residuals, initial, bounds=(lower, upper), method='trf',
+                    max_nfev=5000, ftol=1e-11, xtol=1e-11, gtol=1e-11)
+                start_deviance = float(np.sum(residuals(fitted_start.x) ** 2))
+                start_times, start_weights, *_ = unpack(fitted_start.x)
+                start_bound_hits = tuple(
+                    name for name, active in zip(
+                        parameter_names, fitted_start.active_mask)
+                    if active != 0)
+                start_records.append(MultistartFitRecord(
+                    start_index=int(start_index),
+                    parameter_vector=np.asarray(fitted_start.x, dtype=float).copy(),
+                    rotational_correlation_times_ns=np.asarray(
+                        start_times, dtype=float).copy(),
+                    component_weights=np.asarray(start_weights, dtype=float).copy(),
+                    poisson_deviance=start_deviance,
+                    success=bool(fitted_start.success),
+                    message=str(fitted_start.message),
+                    parameters_at_bounds=start_bound_hits))
+                if fitted_start.success:
+                    solutions.append((start_deviance, fitted_start))
+            except (ValueError, FloatingPointError) as exc:
+                start_times, start_weights, *_ = unpack(initial)
+                start_records.append(MultistartFitRecord(
+                    start_index=int(start_index),
+                    parameter_vector=np.asarray(initial, dtype=float).copy(),
+                    rotational_correlation_times_ns=np.asarray(
+                        start_times, dtype=float).copy(),
+                    component_weights=np.asarray(start_weights, dtype=float).copy(),
+                    poisson_deviance=float('inf'), success=False,
+                    message=f'{type(exc).__name__}: {exc}',
+                    parameters_at_bounds=()))
+        if not solutions:
+            parameter_count = 2 * component_count + 4
+            degrees_of_freedom = observations - parameter_count
+            failed_warnings = ['no optimizer start converged']
+            if component_count == 3:
+                failed_warnings.append(
+                    'three-component parameter robustness is not validated')
+            failed_warnings.append(
+                'physical resolution not established: uncertainty validation '
+                'unavailable')
+            candidates.append(MulticomponentModelFit(
+                component_count=component_count,
+                rotational_correlation_times_ns=np.full(
+                    component_count, np.nan),
+                component_weights=np.full(component_count, np.nan),
+                intensity_lifetime_ns=float(intensity_lifetime_ns),
+                initial_anisotropy=float('nan'), amplitude=float('nan'),
+                parallel_model=np.full(time_ns.shape, np.nan),
+                perpendicular_model=np.full(time_ns.shape, np.nan),
+                parallel_residual=np.full(time_ns.shape, np.nan),
+                perpendicular_residual=np.full(time_ns.shape, np.nan),
+                poisson_deviance=float('inf'),
+                degrees_of_freedom=int(degrees_of_freedom),
+                deviance_per_degree_of_freedom=float('inf'),
+                bic=float('inf'), aicc=float('inf'), success=False,
+                message='No optimizer start converged',
+                parameters_at_bounds=(), identifiable=False,
+                identifiability_warnings=tuple(failed_warnings),
+                common_irf_shift_bins=float('nan'),
+                parallel_background=float('nan'),
+                perpendicular_background=float('nan'),
+                component_bounds_ns=np.asarray(candidate_bounds, dtype=float),
+                multistart_count=int(multistart),
+                multistart_records=tuple(start_records),
+                eligible_for_selection=False,
+                parameter_names=parameter_names))
+            continue
+        solutions.sort(key=lambda item: item[0])
+        deviance, fitted = solutions[0]
+        times, weights, r0, amplitude, shift_bins, parallel_bg, perpendicular_bg = (
+            unpack(fitted.x))
+        parallel_model, perpendicular_model = models(fitted.x)
+        parameter_count = 2 * component_count + 4
+        degrees_of_freedom = observations - parameter_count
+        deviance_per_degree_of_freedom = (
+            deviance / degrees_of_freedom
+            if degrees_of_freedom > 0 else np.inf)
+        bic = deviance + parameter_count * np.log(observations)
+        if observations <= parameter_count + 1:
+            aicc = np.inf
+        else:
+            aicc = (deviance + 2.0 * parameter_count
+                    + 2.0 * parameter_count * (parameter_count + 1)
+                    / (observations - parameter_count - 1))
+        parameters_at_bounds = tuple(
+            name for name, active in zip(parameter_names, fitted.active_mask)
+            if active != 0)
+        warnings = []
+        if not fitted.success:
+            warnings.append('optimizer did not converge')
+        if parameters_at_bounds:
+            warnings.append(
+                'fit parameter reached a bound: '
+                + ', '.join(parameters_at_bounds))
+        if deviance_per_degree_of_freedom > 2.0:
+            warnings.append(
+                'Poisson deviance per degree of freedom exceeds 2')
+        if component_count == 3:
+            warnings.append(
+                'three-component parameter robustness is not validated')
+        warnings.append(
+            'physical resolution not established: uncertainty validation '
+            'unavailable')
+        if np.any(weights < 0.05):
+            warnings.append('component weight below 0.05')
+        if (component_count > 1
+                and np.any(times[1:] / times[:-1] < 1.5)):
+            warnings.append('component times are not separated by 1.5x')
+        if np.any(np.abs(fitted.x[:component_count]) >= 7.5):
+            warnings.append('component time reached a bound')
+        if times[0] < irf_resolution_ns:
+            warnings.append('fastest component is below the IRF resolution')
+        if times[-1] >= 0.95 * candidate_bounds[-1, 1]:
+            warnings.append('slowest component reached the observation bound')
+        competitive = [
+            unpack(solution.x) for other_deviance, solution in solutions
+            if other_deviance <= deviance + 2.0]
+        if len(competitive) > 1:
+            time_sets = np.asarray([solution[0] for solution in competitive])
+            weight_sets = np.asarray([solution[1] for solution in competitive])
+            relative_time_spread = np.max(
+                np.ptp(time_sets, axis=0) / np.maximum(times, 1e-12))
+            weight_spread = np.max(np.ptp(weight_sets, axis=0))
+            if relative_time_spread > 0.2 or weight_spread > 0.1:
+                warnings.append('competitive multistart solutions disagree')
+        candidates.append(MulticomponentModelFit(
+            component_count=component_count,
+            rotational_correlation_times_ns=np.asarray(times, dtype=float),
+            component_weights=np.asarray(weights, dtype=float),
+            intensity_lifetime_ns=float(intensity_lifetime_ns),
+            initial_anisotropy=r0, amplitude=amplitude,
+            parallel_model=parallel_model,
+            perpendicular_model=perpendicular_model,
+            parallel_residual=poisson_residual(parallel, parallel_model),
+            perpendicular_residual=poisson_residual(
+                perpendicular, perpendicular_model),
+            poisson_deviance=deviance,
+            degrees_of_freedom=int(degrees_of_freedom),
+            deviance_per_degree_of_freedom=float(
+                deviance_per_degree_of_freedom),
+            bic=float(bic), aicc=float(aicc),
+            success=bool(fitted.success), message=str(fitted.message),
+            parameters_at_bounds=parameters_at_bounds,
+            identifiable=not warnings,
+            identifiability_warnings=tuple(warnings),
+            common_irf_shift_bins=shift_bins,
+            parallel_background=parallel_bg,
+            perpendicular_background=perpendicular_bg,
+            component_bounds_ns=np.asarray(candidate_bounds, dtype=float),
+            multistart_count=int(multistart),
+            multistart_records=tuple(start_records),
+            eligible_for_selection=True,
+            parameter_names=parameter_names))
+
+    eligible_candidates = [
+        candidate for candidate in candidates
+        if candidate.eligible_for_selection]
+    if fixed_component_count is not None:
+        selected_component_count = (
+            int(fixed_component_count) if eligible_candidates else 0)
+        selection_mode = 'fixed_k'
+    else:
+        selection_mode = 'bic_comparison'
+        if eligible_candidates:
+            best_bic = min(candidate.bic for candidate in eligible_candidates)
+            selected_component_count = next(
+                candidate.component_count for candidate in eligible_candidates
+                if candidate.bic <= best_bic + 2.0)
+        else:
+            selected_component_count = 0
+        for candidate in candidates:
+            if (candidate.eligible_for_selection
+                    and candidate.component_count > selected_component_count > 0):
+                candidate.identifiability_warnings += (
+                    'simpler model preferred by BIC',)
+                candidate.identifiable = False
+    return MulticomponentFitResult(
+        max_components=int(
+            fixed_component_count
+            if fixed_component_count is not None else max_components),
+        selected_component_count=int(selected_component_count),
+        candidates=tuple(candidates), selection_mode=selection_mode)
 
 
 def calculate_late_window_stability(
@@ -707,6 +1344,82 @@ def save_anisotropy_npz(result, path):
                 stability.selected_perpendicular_photons),
             'late_window_interpretation': stability.interpretation,
         })
+    comparison = getattr(result, 'multicomponent_fit', None)
+    if comparison is not None:
+        payload.update({
+            'advanced_max_components': comparison.max_components,
+            'advanced_selected_component_count': (
+                comparison.selected_component_count),
+            'advanced_selection_mode': comparison.selection_mode,
+            'advanced_cross_k_bic_selection': (
+                comparison.selection_mode == 'bic_comparison'
+                and comparison.max_components > 1),
+            'advanced_residual_type': 'signed_poisson_deviance',
+        })
+        for candidate in comparison.candidates:
+            prefix = f'advanced_candidate_{candidate.component_count}'
+            payload.update({
+                f'{prefix}_times_ns': (
+                    candidate.rotational_correlation_times_ns),
+                f'{prefix}_weights': candidate.component_weights,
+                f'{prefix}_intensity_lifetime_ns': (
+                    candidate.intensity_lifetime_ns),
+                f'{prefix}_initial_anisotropy': candidate.initial_anisotropy,
+                f'{prefix}_amplitude': candidate.amplitude,
+                f'{prefix}_parallel_model': candidate.parallel_model,
+                f'{prefix}_perpendicular_model': candidate.perpendicular_model,
+                f'{prefix}_parallel_residual': candidate.parallel_residual,
+                f'{prefix}_perpendicular_residual': (
+                    candidate.perpendicular_residual),
+                f'{prefix}_poisson_deviance': candidate.poisson_deviance,
+                f'{prefix}_degrees_of_freedom': candidate.degrees_of_freedom,
+                f'{prefix}_deviance_per_degree_of_freedom': (
+                    candidate.deviance_per_degree_of_freedom),
+                f'{prefix}_bic': candidate.bic,
+                f'{prefix}_aicc': candidate.aicc,
+                f'{prefix}_success': candidate.success,
+                f'{prefix}_eligible_for_selection': (
+                    candidate.eligible_for_selection),
+                f'{prefix}_message': candidate.message,
+                f'{prefix}_parameters_at_bounds': np.asarray(
+                    candidate.parameters_at_bounds, dtype=str),
+                f'{prefix}_identifiable': candidate.identifiable,
+                f'{prefix}_warnings': np.asarray(
+                    candidate.identifiability_warnings, dtype=str),
+                f'{prefix}_common_irf_shift_bins': (
+                    candidate.common_irf_shift_bins),
+                f'{prefix}_parallel_background': candidate.parallel_background,
+                f'{prefix}_perpendicular_background': (
+                    candidate.perpendicular_background),
+                f'{prefix}_component_bounds_ns': candidate.component_bounds_ns,
+                f'{prefix}_multistart_count': candidate.multistart_count,
+                f'{prefix}_parameter_names': np.asarray(
+                    candidate.parameter_names, dtype=str),
+                f'{prefix}_start_indices': np.asarray([
+                    record.start_index
+                    for record in candidate.multistart_records], dtype=int),
+                f'{prefix}_start_parameter_vectors': np.stack([
+                    record.parameter_vector
+                    for record in candidate.multistart_records]),
+                f'{prefix}_start_times_ns': np.stack([
+                    record.rotational_correlation_times_ns
+                    for record in candidate.multistart_records]),
+                f'{prefix}_start_weights': np.stack([
+                    record.component_weights
+                    for record in candidate.multistart_records]),
+                f'{prefix}_start_poisson_deviance': np.asarray([
+                    record.poisson_deviance
+                    for record in candidate.multistart_records], dtype=float),
+                f'{prefix}_start_success': np.asarray([
+                    record.success
+                    for record in candidate.multistart_records], dtype=bool),
+                f'{prefix}_start_messages': np.asarray([
+                    record.message
+                    for record in candidate.multistart_records], dtype=str),
+                f'{prefix}_start_parameters_at_bounds': np.asarray([
+                    ';'.join(record.parameters_at_bounds)
+                    for record in candidate.multistart_records], dtype=str),
+            })
     if result.polarized_fit is not None:
         fit = result.polarized_fit
         payload.update({

@@ -187,6 +187,516 @@ def test_global_polarized_fit_reports_parameters_at_bounds():
     assert 'initial_anisotropy' in fitted.parameters_at_bounds
 
 
+def test_multicomponent_models_reduce_to_single_component_with_strict_tolerance():
+    from flimkit_anisotropy.anisotropy import (
+        multicomponent_polarized_decay_models, polarized_decay_models)
+
+    time_ns = np.arange(128, dtype=float) * 0.1
+    bins = np.arange(time_ns.size, dtype=float)
+    parallel_irf = np.exp(-0.5 * ((bins - 8.0) / 1.2) ** 2)
+    perpendicular_irf = np.exp(-0.5 * ((bins - 11.0) / 1.8) ** 2)
+    expected = polarized_decay_models(
+        time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.2, rotational_correlation_ns=1.4,
+        initial_anisotropy=0.32, amplitude=12000.0,
+        g_factor=1.3, parallel_exposure=1.5,
+        perpendicular_exposure=0.8,
+        parallel_background=2.5, perpendicular_background=7.0,
+        repetition_period_ns=12.8, common_irf_shift_bins=0.7)
+
+    actual = multicomponent_polarized_decay_models(
+        time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.2,
+        rotational_correlation_times_ns=[1.4], component_weights=[1.0],
+        initial_anisotropy=0.32, amplitude=12000.0,
+        g_factor=1.3, parallel_exposure=1.5,
+        perpendicular_exposure=0.8,
+        parallel_background=2.5, perpendicular_background=7.0,
+        repetition_period_ns=12.8, common_irf_shift_bins=0.7)
+
+    np.testing.assert_allclose(actual[0], expected[0], rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(actual[1], expected[1], rtol=1e-12, atol=1e-12)
+
+
+def test_multicomponent_models_use_ordered_normalized_components():
+    from flimkit_anisotropy.anisotropy import multicomponent_polarized_decay_models
+
+    time_ns = np.arange(6, dtype=float)
+    irf = np.eye(1, 6, 0).ravel()
+    amplitude = 300.0
+    lifetime_ns = 4.0
+    r0 = 0.3
+    times_ns = np.array([1.0, 3.0])
+    weights = np.array([0.25, 0.75])
+
+    parallel, perpendicular = multicomponent_polarized_decay_models(
+        time_ns, irf, irf, intensity_lifetime_ns=lifetime_ns,
+        rotational_correlation_times_ns=times_ns,
+        component_weights=weights, initial_anisotropy=r0,
+        amplitude=amplitude)
+
+    intensity = amplitude * np.exp(-time_ns / lifetime_ns)
+    anisotropy = r0 * sum(
+        weight * np.exp(-time_ns / theta)
+        for theta, weight in zip(times_ns, weights))
+    polarized = intensity * anisotropy
+    np.testing.assert_allclose(parallel, (intensity + 2.0 * polarized) / 3.0)
+    np.testing.assert_allclose(perpendicular, (intensity - polarized) / 3.0)
+
+
+@pytest.mark.parametrize(
+    'times, weights, message', [
+        ([2.0, 1.0], [0.5, 0.5], 'strictly increasing'),
+        ([1.0, 2.0], [0.5, -0.5], 'non-negative'),
+        ([1.0, 2.0], [0.4, 0.4], 'sum to one'),
+        ([1.0], [0.5, 0.5], 'same length'),
+    ])
+def test_multicomponent_models_reject_invalid_components(times, weights, message):
+    from flimkit_anisotropy.anisotropy import multicomponent_polarized_decay_models
+
+    time_ns = np.arange(8, dtype=float)
+    irf = np.eye(1, 8, 0).ravel()
+    with pytest.raises(ValueError, match=message):
+        multicomponent_polarized_decay_models(
+            time_ns, irf, irf, intensity_lifetime_ns=3.0,
+            rotational_correlation_times_ns=times,
+            component_weights=weights, initial_anisotropy=0.3,
+            amplitude=100.0)
+
+
+def _multicomponent_synthetic_truth(
+        times_ns, weights, seed=None, amplitude=4e6, g_factor=1.35):
+    from flimkit_anisotropy.anisotropy import multicomponent_polarized_decay_models
+
+    time_ns = np.arange(132, dtype=float) * (12.8 / 132.0)
+    bins = np.arange(time_ns.size, dtype=float)
+    parallel_irf = np.exp(-0.5 * ((bins - 8.0) / 1.1) ** 2)
+    perpendicular_irf = np.exp(-0.5 * ((bins - 10.0) / 1.5) ** 2)
+    parallel, perpendicular = multicomponent_polarized_decay_models(
+        time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0,
+        rotational_correlation_times_ns=times_ns,
+        component_weights=weights, initial_anisotropy=0.34,
+        amplitude=amplitude, g_factor=g_factor,
+        parallel_background=15.0, perpendicular_background=22.0,
+        repetition_period_ns=12.8, common_irf_shift_bins=0.4)
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        parallel = rng.poisson(parallel).astype(float)
+        perpendicular = rng.poisson(perpendicular).astype(float)
+    return time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular
+
+
+@pytest.mark.parametrize('seed', [31, 57, 89])
+def test_clear_two_component_signal_is_recovered_but_not_called_resolved(seed):
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    truth_times = np.array([0.45, 3.2])
+    truth_weights = np.array([0.35, 0.65])
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth(truth_times, truth_weights, seed=seed))
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, g_factor=1.35,
+        repetition_period_ns=12.8, max_components=2, multistart=6)
+
+    assert result.selected_component_count == 2
+    np.testing.assert_allclose(
+        result.selected_fit.rotational_correlation_times_ns,
+        truth_times, rtol=0.18)
+    np.testing.assert_allclose(
+        result.selected_fit.component_weights, truth_weights, atol=0.08)
+    assert not result.has_resolved_model
+    assert any('uncertainty validation unavailable' in warning
+               for warning in result.selected_fit.identifiability_warnings)
+
+
+@pytest.mark.parametrize('case', [
+    'low_counts', 'weak_component', 'g_mismatch', 'irf_mismatch'])
+def test_challenging_two_component_cases_remain_fail_closed(case):
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    weights = [0.35, 0.65]
+    amplitude = 4e6
+    truth_g = 1.35
+    if case == 'low_counts':
+        amplitude = 1e5
+    elif case == 'weak_component':
+        weights = [0.08, 0.92]
+    elif case == 'g_mismatch':
+        truth_g = 1.55
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth(
+            [0.45, 3.2], weights, seed=211, amplitude=amplitude,
+            g_factor=truth_g))
+    fit_parallel_irf = parallel_irf
+    if case == 'irf_mismatch':
+        fit_parallel_irf = np.roll(parallel_irf, 2)
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, fit_parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, g_factor=1.35,
+        repetition_period_ns=12.8, max_components=2, multistart=5)
+
+    assert all(np.isfinite(candidate.bic) for candidate in result.candidates)
+    assert not result.has_resolved_model
+    assert result.resolved_component_count == 0
+    assert all(not candidate.identifiable for candidate in result.candidates)
+
+
+def test_multicomponent_fit_selects_three_but_keeps_it_exploratory():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    truth_times = np.array([0.35, 1.4, 5.0])
+    truth_weights = np.array([0.25, 0.35, 0.40])
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth(truth_times, truth_weights, seed=103))
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, g_factor=1.35,
+        repetition_period_ns=12.8, max_components=3, multistart=6)
+
+    assert result.selected_component_count == 3
+    selected = result.selected_fit
+    assert selected.success
+    assert not selected.identifiable
+    assert 'three-component parameter robustness is not validated' in (
+        selected.identifiability_warnings)
+    np.testing.assert_allclose(
+        selected.rotational_correlation_times_ns, truth_times, rtol=0.18)
+    np.testing.assert_allclose(selected.component_weights, truth_weights, atol=0.08)
+    assert np.all(np.diff(selected.rotational_correlation_times_ns) > 0)
+    assert selected.component_weights.sum() == pytest.approx(1.0)
+    assert not result.has_resolved_model
+    assert result.resolved_component_count == 0
+
+
+@pytest.mark.parametrize('time_ns, message', [
+    (np.array([0.0]), 'at least 2'),
+    (np.array([0.0, np.nan]), 'finite'),
+    (np.array([0.0, -0.1, -0.2]), 'strictly increasing'),
+    (np.array([0.0, 0.1, 0.25]), 'evenly spaced'),
+])
+def test_multicomponent_model_rejects_invalid_time_axis(time_ns, message):
+    from flimkit_anisotropy.anisotropy import multicomponent_polarized_decay_models
+
+    irf = np.ones(time_ns.size, dtype=float)
+    with pytest.raises(ValueError, match=message):
+        multicomponent_polarized_decay_models(
+            time_ns, irf, irf,
+            intensity_lifetime_ns=3.0,
+            rotational_correlation_times_ns=[1.0],
+            component_weights=[1.0], initial_anisotropy=0.3,
+            repetition_period_ns=12.8, common_irf_shift_bins=0.0,
+            parallel_background=0.0, perpendicular_background=0.0,
+            parallel_exposure=1.0, perpendicular_exposure=1.0,
+            g_factor=1.0, amplitude=100.0)
+
+
+def test_manual_bounds_apply_consistently_to_every_candidate():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth(
+            [0.35, 1.4, 5.0], [0.3, 0.35, 0.35], seed=23))
+    manual_bounds = np.array([0.2, 6.0])
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=12.8,
+        max_components=3, multistart=2,
+        component_bounds_ns=manual_bounds)
+
+    for component_count, candidate in enumerate(result.candidates, start=1):
+        np.testing.assert_allclose(
+            candidate.component_bounds_ns,
+            np.tile(manual_bounds, (component_count, 1)))
+
+
+def test_multicomponent_result_defaults_to_bic_comparison_mode():
+    from flimkit_anisotropy.anisotropy import MulticomponentFitResult
+
+    result = MulticomponentFitResult(
+        max_components=1, selected_component_count=0, candidates=())
+
+    assert result.selection_mode == 'bic_comparison'
+
+
+def test_fixed_k_uses_one_bound_range_per_exponential_component():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth([0.55, 3.5], [0.4, 0.6], seed=31))
+    component_bounds = np.array([[0.2, 1.0], [1.5, 8.0]])
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=12.8,
+        max_components=3, fixed_component_count=2, multistart=3,
+        component_bounds_ns=component_bounds)
+
+    assert result.selection_mode == 'fixed_k'
+    assert result.max_components == 2
+    assert result.selected_component_count == 2
+    assert len(result.candidates) == 1
+    assert result.selected_fit is result.candidates[0]
+    assert result.selected_fit.component_count == 2
+    np.testing.assert_allclose(
+        result.selected_fit.component_bounds_ns, component_bounds)
+    assert 0.2 <= result.selected_fit.rotational_correlation_times_ns[0] <= 1.0
+    assert 1.5 <= result.selected_fit.rotational_correlation_times_ns[1] <= 8.0
+
+
+def test_fixed_k_touching_ranges_still_produce_strictly_ordered_times():
+    from flimkit_anisotropy.anisotropy import _manual_component_times
+
+    bounds = np.array([[0.1, 0.8], [0.8, 2.0], [2.0, 10.0]])
+    for parameters in (
+            np.full(3, -8.0), np.zeros(3), np.full(3, 8.0)):
+        times = _manual_component_times(parameters, bounds)
+        assert np.all(np.diff(times) > 0)
+        assert np.all(times > bounds[:, 0])
+        assert np.all(times < bounds[:, 1])
+
+
+def test_multicomponent_fit_rejects_spurious_extra_components():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth([1.5], [1.0], seed=101))
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, g_factor=1.35,
+        repetition_period_ns=12.8, max_components=3, multistart=5)
+
+    assert result.selected_component_count == 1
+    assert len(result.candidates) == 3
+    assert not result.candidates[0].identifiable
+    assert any('uncertainty validation unavailable' in warning
+               for warning in result.candidates[0].identifiability_warnings)
+    assert not result.has_resolved_model
+    for candidate in result.candidates[1:]:
+        assert not candidate.identifiable
+        assert 'simpler model preferred by BIC' in candidate.identifiability_warnings
+    assert result.candidates[0].bic < result.candidates[1].bic
+    assert result.candidates[0].bic < result.candidates[2].bic
+
+
+def test_multicomponent_fit_validates_component_controls():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns = np.arange(16, dtype=float) * 0.1
+    irf = np.eye(1, 16, 1).ravel()
+    observed = np.ones(16)
+    with pytest.raises(ValueError, match='between one and three'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, max_components=4)
+    with pytest.raises(ValueError, match='multistart'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, max_components=2, multistart=0)
+    with pytest.raises(ValueError, match='at most 32'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, max_components=2, multistart=33)
+    with pytest.raises(ValueError, match='fixed_component_count'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=4)
+    with pytest.raises(ValueError, match='fixed_component_count'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=True,
+            component_bounds_ns=((0.2, 4.0),))
+    with pytest.raises(ValueError, match='fixed-K mode'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0,
+            component_bounds_ns=((0.2, 0.8), (1.0, 4.0)))
+    with pytest.raises(ValueError, match='exactly one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2)
+    with pytest.raises(ValueError, match='exactly one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2,
+            component_bounds_ns=(0.2, 4.0))
+    with pytest.raises(ValueError, match='ordered, and non-overlapping'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=2,
+            component_bounds_ns=((0.2, 2.0), (1.0, 4.0)))
+    with pytest.raises(ValueError, match='one range per component'):
+        fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, fixed_component_count=3,
+            component_bounds_ns=((0.2, 0.8), (1.0, 4.0)))
+
+
+def test_periodic_delta_irf_shift_is_defined_across_optimizer_bounds():
+    from flimkit_anisotropy.anisotropy import (
+        fit_multicomponent_polarized_decays,
+        multicomponent_polarized_decay_models)
+
+    time_ns = np.arange(64, dtype=float) * 0.2
+    irf = np.zeros(64, dtype=float)
+    irf[0] = 1.0
+    parallel, perpendicular = multicomponent_polarized_decay_models(
+        time_ns, irf, irf, intensity_lifetime_ns=3.0,
+        rotational_correlation_times_ns=[0.6, 3.0],
+        component_weights=[0.4, 0.6], initial_anisotropy=0.3,
+        amplitude=1e5, parallel_background=2.0,
+        perpendicular_background=3.0, repetition_period_ns=12.8,
+        common_irf_shift_bins=0.4)
+
+    shifted_parallel, shifted_perpendicular = (
+        multicomponent_polarized_decay_models(
+            time_ns, irf, irf, intensity_lifetime_ns=3.0,
+            rotational_correlation_times_ns=[0.6, 3.0],
+            component_weights=[0.4, 0.6], initial_anisotropy=0.3,
+            amplitude=1e5, repetition_period_ns=12.8,
+            common_irf_shift_bins=2.0))
+    assert np.all(np.isfinite(shifted_parallel))
+    assert np.all(np.isfinite(shifted_perpendicular))
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, irf, irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=12.8,
+        max_components=2, multistart=2)
+    assert result.selected_component_count in {1, 2}
+    assert all(len(candidate.multistart_records) == 2
+               for candidate in result.candidates)
+    assert all(any(record.success for record in candidate.multistart_records)
+               for candidate in result.candidates)
+
+
+def test_nonconverged_starts_cannot_win_model_selection():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns = np.arange(16, dtype=float) * 0.2
+    irf = np.zeros(16, dtype=float)
+    irf[2] = 1.0
+    observed = np.linspace(100.0, 5.0, 16)
+    parameters = np.array([0.0, 0.2, np.log(100.0), 0.0, 0.0, 0.0])
+    failed = SimpleNamespace(
+        x=parameters, active_mask=np.zeros(6, dtype=int), success=False,
+        message='failed start')
+    converged = SimpleNamespace(
+        x=parameters, active_mask=np.zeros(6, dtype=int), success=True,
+        message='converged start')
+
+    with patch('flimkit_anisotropy.anisotropy.least_squares',
+               side_effect=[failed, converged]):
+        result = fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, max_components=1, multistart=2)
+
+    assert result.selected_component_count == 1
+    assert result.selected_fit.success
+    assert result.selected_fit.message == 'converged start'
+    assert [record.success for record in result.selected_fit.multistart_records] == [
+        False, True]
+
+
+def test_all_nonconverged_starts_return_ineligible_audit_candidate():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns = np.arange(16, dtype=float) * 0.2
+    irf = np.zeros(16, dtype=float)
+    irf[2] = 1.0
+    observed = np.linspace(100.0, 5.0, 16)
+    parameters = np.array([0.0, 0.2, np.log(100.0), 0.0, 0.0, 0.0])
+    failed = SimpleNamespace(
+        x=parameters, active_mask=np.zeros(6, dtype=int), success=False,
+        message='failed start')
+
+    with patch('flimkit_anisotropy.anisotropy.least_squares',
+               side_effect=[failed, failed]):
+        result = fit_multicomponent_polarized_decays(
+            observed, observed, time_ns, irf, irf,
+            intensity_lifetime_ns=3.0, max_components=1, multistart=2)
+
+    assert result.selected_component_count == 0
+    assert result.selected_fit is None
+    assert not result.has_resolved_model
+    candidate = result.candidates[0]
+    assert not candidate.eligible_for_selection
+    assert not candidate.success
+    assert np.isinf(candidate.bic)
+    assert len(candidate.multistart_records) == 2
+    assert all(not record.success for record in candidate.multistart_records)
+    assert 'no optimizer start converged' in candidate.identifiability_warnings
+
+
+def test_multicomponent_fit_preserves_every_start_and_poisson_residuals():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth([1.5], [1.0], seed=17))
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=12.8,
+        max_components=2, multistart=4)
+
+    candidate = result.candidates[1]
+    assert len(candidate.multistart_records) == 4
+    assert [record.start_index for record in candidate.multistart_records] == list(range(4))
+    for record in candidate.multistart_records:
+        assert record.parameter_vector.shape == (8,)
+        assert record.rotational_correlation_times_ns.shape == (2,)
+        assert record.component_weights.shape == (2,)
+        assert np.isfinite(record.poisson_deviance)
+        assert isinstance(record.success, bool)
+        assert isinstance(record.message, str)
+        assert isinstance(record.parameters_at_bounds, tuple)
+
+    def signed_poisson(observed, expected):
+        expected = np.maximum(expected, 1e-12)
+        contribution = expected - observed
+        positive = observed > 0
+        contribution[positive] += observed[positive] * np.log(
+            observed[positive] / expected[positive])
+        return np.sign(expected - observed) * np.sqrt(
+            np.maximum(2.0 * contribution, 0.0))
+
+    np.testing.assert_allclose(
+        candidate.parallel_residual,
+        signed_poisson(parallel, candidate.parallel_model))
+    np.testing.assert_allclose(
+        candidate.perpendicular_residual,
+        signed_poisson(perpendicular, candidate.perpendicular_model))
+
+
+def test_multicomponent_fit_rejects_gross_model_mismatch():
+    from flimkit_anisotropy.anisotropy import fit_multicomponent_polarized_decays
+
+    time_ns = np.arange(16, dtype=float) * 0.1
+    irf = np.eye(1, 16, 1).ravel()
+    parallel = np.tile([1.0, 10000.0], 8)
+    perpendicular = np.tile([10000.0, 1.0], 8)
+
+    result = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, irf, irf,
+        intensity_lifetime_ns=3.0, repetition_period_ns=1.6,
+        max_components=1, multistart=2)
+
+    selected = result.selected_fit
+    assert selected.deviance_per_degree_of_freedom > 2.0
+    assert 'Poisson deviance per degree of freedom exceeds 2' in (
+        selected.identifiability_warnings)
+    assert not result.has_resolved_model
+    assert result.resolved_component_count == 0
+
+
 def test_late_window_stability_uses_exposure_corrected_nested_counts():
     from flimkit_anisotropy.anisotropy import calculate_late_window_stability
 
@@ -623,3 +1133,85 @@ def test_save_anisotropy_npz_preserves_masks_and_safe_metadata(tmp_path):
         saved['late_window_rolling_scale'],
         result.late_window_stability.rolling_scale)
     assert saved['late_window_selected_scale'].item() == pytest.approx(2.0)
+
+
+def test_save_anisotropy_npz_preserves_all_multicomponent_candidates(tmp_path):
+    from flimkit_anisotropy.anisotropy import (
+        analyze_anisotropy, fit_multicomponent_polarized_decays,
+        save_anisotropy_npz)
+
+    time_ns, parallel_irf, perpendicular_irf, parallel, perpendicular = (
+        _multicomponent_synthetic_truth([0.45, 3.2], [0.35, 0.65], seed=102))
+    comparison = fit_multicomponent_polarized_decays(
+        parallel, perpendicular, time_ns, parallel_irf, perpendicular_irf,
+        intensity_lifetime_ns=3.0, g_factor=1.35,
+        repetition_period_ns=12.8, max_components=2,
+        fixed_component_count=2, multistart=4,
+        component_bounds_ns=((0.2, 0.9), (1.1, 6.0)))
+    result = analyze_anisotropy(
+        parallel[None, None, :], perpendicular[None, None, :], time_ns,
+        background_bins=slice(0, 2), analysis_bins=slice(0, 40),
+        g_factor=1.35, min_bin_photons=0.0, min_map_photons=0.0)
+    result.multicomponent_fit = comparison
+    result.metadata.update({
+        'parallel_irf_file': 'parallel_irf.ptu',
+        'perpendicular_irf_file': 'perpendicular_irf.ptu',
+        'repetition_period_ns': 12.8,
+        'global_fit_bins': 132,
+        'analysis_mode': 'advanced',
+        'advanced_fit_mode': 'fixed_k',
+        'advanced_fixed_component_count': 2,
+        'advanced_component_range_mode': 'per-component',
+    })
+    path = tmp_path / 'advanced.npz'
+
+    save_anisotropy_npz(result, path)
+
+    saved = np.load(path, allow_pickle=False)
+    assert saved['advanced_max_components'].item() == 2
+    assert saved['advanced_selected_component_count'].item() == 2
+    assert saved['advanced_selection_mode'].item() == 'fixed_k'
+    assert saved['advanced_cross_k_bic_selection'].item() is False
+    for candidate in comparison.candidates:
+        prefix = f'advanced_candidate_{candidate.component_count}'
+        np.testing.assert_allclose(
+            saved[f'{prefix}_times_ns'],
+            candidate.rotational_correlation_times_ns)
+        np.testing.assert_allclose(
+            saved[f'{prefix}_weights'], candidate.component_weights)
+        assert saved[f'{prefix}_bic'].item() == pytest.approx(candidate.bic)
+        assert saved[f'{prefix}_aicc'].item() == pytest.approx(candidate.aicc)
+        assert saved[f'{prefix}_identifiable'].item() == candidate.identifiable
+        np.testing.assert_array_equal(
+            saved[f'{prefix}_component_bounds_ns'],
+            candidate.component_bounds_ns)
+        np.testing.assert_array_equal(
+            saved[f'{prefix}_parallel_model'], candidate.parallel_model)
+        np.testing.assert_allclose(
+            saved[f'{prefix}_start_parameter_vectors'],
+            np.stack([record.parameter_vector
+                      for record in candidate.multistart_records]))
+        np.testing.assert_allclose(
+            saved[f'{prefix}_start_times_ns'],
+            np.stack([record.rotational_correlation_times_ns
+                      for record in candidate.multistart_records]))
+        np.testing.assert_allclose(
+            saved[f'{prefix}_start_weights'],
+            np.stack([record.component_weights
+                      for record in candidate.multistart_records]))
+        np.testing.assert_allclose(
+            saved[f'{prefix}_start_poisson_deviance'],
+            [record.poisson_deviance for record in candidate.multistart_records])
+        np.testing.assert_array_equal(
+            saved[f'{prefix}_start_success'],
+            [record.success for record in candidate.multistart_records])
+        assert saved[f'{prefix}_start_messages'].dtype.kind in {'U', 'S'}
+        assert len(saved[f'{prefix}_parameter_names']) == len(
+            candidate.multistart_records[0].parameter_vector)
+        assert saved[f'{prefix}_eligible_for_selection'].item() == (
+            candidate.eligible_for_selection)
+        assert saved[f'{prefix}_warnings'].dtype.kind in {'U', 'S'}
+    assert saved['advanced_residual_type'].item() == 'signed_poisson_deviance'
+    assert saved['parallel_irf_file'].item() == 'parallel_irf.ptu'
+    assert saved['perpendicular_irf_file'].item() == 'perpendicular_irf.ptu'
+    assert saved['repetition_period_ns'].item() == pytest.approx(12.8)

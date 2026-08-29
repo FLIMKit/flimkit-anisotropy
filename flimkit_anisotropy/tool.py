@@ -9,6 +9,31 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 
 
+def _spreadsheet_safe(value):
+    if (isinstance(value, str)
+            and value.lstrip().startswith(('=', '+', '-', '@'))):
+        return "'" + value
+    return value
+
+
+def _advanced_model_description(selection_mode, max_components):
+    if selection_mode == 'fixed_k':
+        return (
+            'fixed single fluorescence lifetime; fixed-K expert rotational '
+            'correlations; no cross-K BIC selection')
+    if max_components == 1:
+        return (
+            'fixed single fluorescence lifetime; K1 rotational-correlation '
+            'model; no cross-K BIC selection')
+    return (
+        'fixed single fluorescence lifetime; compared ordered '
+        f'K1-K{max_components} rotational-correlation models')
+
+
+def _uses_cross_k_bic(selection_mode, max_components):
+    return selection_mode == 'bic_comparison' and max_components > 1
+
+
 class AnisotropyTool(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -34,6 +59,16 @@ class AnisotropyTool(tk.Toplevel):
         self.g_factor = tk.DoubleVar(value=1.0)
         self.g_mode = tk.StringVar(value='Assumed scale')
         self.late_window_start_ns = tk.DoubleVar(value=9.6)
+        self.max_components = tk.IntVar(value=1)
+        self.multistart = tk.IntVar(value=6)
+        self.advanced_fit_mode = tk.StringVar(value='Compare K1-Kmax (BIC)')
+        self.component_range_mode = tk.StringVar(value='Auto')
+        self.shared_component_lower_ns = tk.DoubleVar(value=0.2)
+        self.shared_component_upper_ns = tk.DoubleVar(value=6.0)
+        self.component_lower_ns = [
+            tk.DoubleVar(value=value) for value in (0.2, 1.5, 3.5)]
+        self.component_upper_ns = [
+            tk.DoubleVar(value=value) for value in (1.0, 3.0, 6.0)]
         self.parallel_exposure = tk.DoubleVar(value=1.0)
         self.perpendicular_exposure = tk.DoubleVar(value=1.0)
         self.parallel_channel = tk.IntVar(value=0)
@@ -61,6 +96,10 @@ class AnisotropyTool(tk.Toplevel):
             self.toolbar, text='Scale diagnostic...',
             command=self._show_scale_diagnostic, state='disabled')
         self.scale_diagnostic_button.pack(side='left', padx=(6, 0))
+        self.fit_details_button = ttk.Button(
+            self.toolbar, text='Fit details...',
+            command=self._show_advanced_details, state='disabled')
+        self.fit_details_button.pack(side='left', padx=(6, 0))
         self.save_npz_button = ttk.Button(
             self.toolbar, text='Save NPZ...', command=self._save_npz,
             state='disabled')
@@ -69,8 +108,10 @@ class AnisotropyTool(tk.Toplevel):
             self.toolbar, text='Save CSV...', command=self._save_csv,
             state='disabled')
         self.save_csv_button.pack(side='left', padx=(6, 0))
-        ttk.Label(self.toolbar, textvariable=self.status).pack(
-            side='left', padx=12)
+        self.status_label = ttk.Label(
+            self.toolbar, textvariable=self.status, wraplength=650,
+            justify='left')
+        self.status_label.pack(side='left', padx=12)
 
         self.input_panel = ttk.Frame(self, padding=(10, 0, 10, 8))
         self.input_panel.pack(fill='x', after=self.toolbar)
@@ -96,6 +137,9 @@ class AnisotropyTool(tk.Toplevel):
         ttk.Radiobutton(
             modes, text='Preferred global fit (Lakowicz Section 11.2.2)',
             variable=self.analysis_mode, value='global').pack(side='left', padx=12)
+        ttk.Radiobutton(
+            modes, text='Advanced 1/2/3-component fit',
+            variable=self.analysis_mode, value='advanced').pack(side='left')
         ttk.Button(modes, text='Method info...',
                    command=self._show_method_info).pack(side='left')
 
@@ -140,11 +184,124 @@ class AnisotropyTool(tk.Toplevel):
             variable=self.auto_register).grid(
                 row=5, column=3, columnspan=3, sticky='w', pady=(4, 0))
 
+        advanced = ttk.LabelFrame(
+            self.input_panel, text='Advanced component settings', padding=8)
+        self.advanced_settings_frame = advanced
+        advanced.grid(
+            row=6, column=0, columnspan=3, sticky='ew', pady=(8, 0))
+        ttk.Label(advanced, text='Fit mode').grid(
+            row=0, column=0, sticky='w', padx=(0, 4))
+        ttk.Combobox(
+            advanced, textvariable=self.advanced_fit_mode, state='readonly',
+            values=('Compare K1-Kmax (BIC)', 'Fixed K expert'), width=23).grid(
+                row=0, column=1, columnspan=2, sticky='w', padx=(0, 14))
+        ttk.Label(advanced, text='Components / K max').grid(
+            row=0, column=3, sticky='w', padx=(0, 4))
+        ttk.Combobox(
+            advanced, textvariable=self.max_components, state='readonly',
+            values=('1', '2', '3'), width=5).grid(
+                row=0, column=4, sticky='w', padx=(0, 14))
+        ttk.Label(advanced, text='Starts').grid(
+            row=0, column=5, sticky='w', padx=(0, 4))
+        ttk.Entry(advanced, textvariable=self.multistart, width=6).grid(
+            row=0, column=6, sticky='w')
+
+        ttk.Label(advanced, text='Comparison bounds').grid(
+            row=1, column=0, sticky='w', padx=(0, 4), pady=(4, 0))
+        self.component_range_combo = ttk.Combobox(
+            advanced, textvariable=self.component_range_mode, state='readonly',
+            values=('Auto', 'Manual'), width=9)
+        self.component_range_combo.grid(
+            row=1, column=1, sticky='w', pady=(4, 0))
+        ttk.Label(advanced, text='shared lower ns').grid(
+            row=1, column=2, sticky='e', pady=(4, 0))
+        lower_entry = ttk.Entry(
+            advanced, textvariable=self.shared_component_lower_ns, width=7)
+        lower_entry.grid(
+            row=1, column=3, sticky='w', padx=(4, 12), pady=(4, 0))
+        ttk.Label(advanced, text='upper ns').grid(
+            row=1, column=4, sticky='e', pady=(4, 0))
+        upper_entry = ttk.Entry(
+            advanced, textvariable=self.shared_component_upper_ns, width=7)
+        upper_entry.grid(
+            row=1, column=5, sticky='w', padx=(4, 12), pady=(4, 0))
+        self.component_bound_entries = [lower_entry, upper_entry]
+
+        ttk.Label(advanced, text='Fixed-K component').grid(
+            row=2, column=0, sticky='w', pady=(6, 0))
+        ttk.Label(advanced, text='lower ns').grid(
+            row=2, column=2, sticky='e', pady=(6, 0))
+        ttk.Label(advanced, text='upper ns').grid(
+            row=2, column=4, sticky='e', pady=(6, 0))
+        self.per_component_bound_entries = []
+        for index in range(3):
+            ttk.Label(advanced, text=f'Exp {index + 1}').grid(
+                row=3 + index, column=0, sticky='w', pady=(2, 0))
+            component_lower = ttk.Entry(
+                advanced, textvariable=self.component_lower_ns[index], width=7)
+            component_lower.grid(
+                row=3 + index, column=3, sticky='w', padx=(4, 12),
+                pady=(2, 0))
+            component_upper = ttk.Entry(
+                advanced, textvariable=self.component_upper_ns[index], width=7)
+            component_upper.grid(
+                row=3 + index, column=5, sticky='w', padx=(4, 12),
+                pady=(2, 0))
+            self.per_component_bound_entries.append(
+                (component_lower, component_upper))
+
+        self.advanced_mode_hint = tk.StringVar()
+        ttk.Label(
+            advanced, textvariable=self.advanced_mode_hint,
+            foreground='#555555', wraplength=940, justify='left').grid(
+                row=6, column=0, columnspan=7, sticky='w', pady=(6, 0))
+
         note = ('File roles are explicit; FLIMKit does not infer them from names. '
                 'G=1 is an assumption unless calibrated independently. An '
                 'effective late-window scale is not a calibrated physical G.')
         ttk.Label(self.input_panel, text=note, foreground='#555555').grid(
-            row=6, column=0, columnspan=3, sticky='w', pady=(6, 0))
+            row=7, column=0, columnspan=3, sticky='w', pady=(6, 0))
+        self.analysis_mode.trace_add('write', self._update_advanced_controls)
+        self.component_range_mode.trace_add(
+            'write', self._update_component_range_controls)
+        self.advanced_fit_mode.trace_add(
+            'write', self._update_component_range_controls)
+        self.max_components.trace_add(
+            'write', self._update_component_range_controls)
+        self._update_advanced_controls()
+        self._update_component_range_controls()
+
+    def _update_advanced_controls(self, *_args):
+        if self.analysis_mode.get() == 'advanced':
+            self.advanced_settings_frame.grid()
+        else:
+            self.advanced_settings_frame.grid_remove()
+
+    def _update_component_range_controls(self, *_args):
+        fixed_k = self.advanced_fit_mode.get() == 'Fixed K expert'
+        self.component_range_combo.configure(
+            state='disabled' if fixed_k else 'readonly')
+        shared_state = (
+            'normal' if (not fixed_k
+                         and self.component_range_mode.get() == 'Manual')
+            else 'disabled')
+        for entry in self.component_bound_entries:
+            entry.configure(state=shared_state)
+        selected_count = self.max_components.get()
+        for index, entries in enumerate(self.per_component_bound_entries):
+            state = 'normal' if fixed_k and index < selected_count else 'disabled'
+            for entry in entries:
+                entry.configure(state=state)
+        if fixed_k:
+            self.advanced_mode_hint.set(
+                'Fixed-K expert mode fits only the chosen K. Set one positive, '
+                'ordered, non-overlapping range per exponential component. '
+                'No cross-K BIC comparison is performed.')
+        else:
+            self.advanced_mode_hint.set(
+                'Comparison mode fits K1 through K max. Manual mode applies one '
+                'shared range to every candidate. For a better G guess, first '
+                'use the effective late-window scale; it is not calibrated G.')
 
     def _toggle_inputs(self):
         self._set_inputs_visible(not bool(self.input_panel.winfo_manager()))
@@ -228,6 +385,136 @@ class AnisotropyTool(tk.Toplevel):
             parent=self, title=title, filetypes=filetypes)
         if path:
             variable.set(path)
+
+    def _show_advanced_details(self):
+        if self.result is None:
+            return None
+        comparison = getattr(self.result, 'multicomponent_fit', None)
+        if comparison is None or comparison.selected_fit is None:
+            return None
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
+        details = tk.Toplevel(self)
+        details.title('Advanced fit details')
+        details.geometry('940x700')
+        notebook = ttk.Notebook(details)
+        notebook.pack(fill='both', expand=True, padx=8, pady=8)
+        fit_tab = ttk.Frame(notebook, padding=6)
+        components_tab = ttk.Frame(notebook, padding=12)
+        identifiability_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(fit_tab, text='Fit curves')
+        notebook.add(components_tab, text='Components')
+        notebook.add(identifiability_tab, text='Identifiability')
+
+        selected = comparison.selected_fit
+        fit_bins = len(selected.parallel_model)
+        time_relative = (
+            self.result.time_ns[:fit_bins] - self.result.time_ns[self.peak_bin])
+        parallel_observed = (
+            self.result.parallel_decay[:fit_bins] + self.result.parallel_background)
+        perpendicular_observed = (
+            self.result.perpendicular_decay[:fit_bins]
+            + self.result.perpendicular_background)
+        figure = Figure(figsize=(8.8, 5.8), dpi=100, constrained_layout=True)
+        axes = figure.subplots(2, 1, sharex=True)
+        for axis, observed, model, label in (
+                (axes[0], parallel_observed, selected.parallel_model, 'Parallel'),
+                (axes[1], perpendicular_observed,
+                 selected.perpendicular_model, 'Perpendicular')):
+            axis.semilogy(
+                time_relative, np.maximum(observed, 1e-3),
+                color='#777777', linewidth=1.2, label='Measured')
+            axis.semilogy(
+                time_relative, np.maximum(model, 1e-3),
+                color='#2468a2', linewidth=2.0, label='Selected model')
+            axis.set_ylabel(f'{label} counts')
+            axis.legend(
+                fontsize=9, loc='upper right', bbox_to_anchor=(0.95, 0.98))
+            axis.grid(alpha=0.2)
+        axes[-1].set_xlabel('Time after peak (ns)')
+        canvas = FigureCanvasTkAgg(figure, master=fit_tab)
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+        canvas.draw_idle()
+
+        fixed_k = getattr(
+            comparison, 'selection_mode', 'bic_comparison') == 'fixed_k'
+        if fixed_k:
+            component_lines = [
+                f'Fixed K{comparison.selected_component_count} expert fit',
+                'No cross-K BIC selection',
+                '',
+            ]
+        else:
+            component_lines = [
+                (f'BIC-selected model: {comparison.selected_component_count} '
+                 'components'),
+                '',
+            ]
+        for candidate in comparison.candidates:
+            state = 'RESOLVED' if candidate.identifiable else 'NOT RESOLVED'
+            candidate_label = (
+                f'K{candidate.component_count} numerical diagnostics'
+                if fixed_k
+                else f'{candidate.component_count}-component candidate')
+            component_lines.append(
+                f'{candidate_label} — '
+                f'BIC {candidate.bic:.6g}; AICc {candidate.aicc:.6g}; {state}')
+            for index, (correlation_time, weight) in enumerate(zip(
+                    candidate.rotational_correlation_times_ns,
+                    candidate.component_weights), start=1):
+                lower, upper = candidate.component_bounds_ns[index - 1]
+                component_lines.append(
+                    f'  Component {index}: {correlation_time:.6g} ns, '
+                    f'weight {weight:.6g}, bounds {lower:.6g}–{upper:.6g} ns')
+            component_lines.append('')
+        components_heading = ttk.Label(
+            components_tab,
+            text='Optimizer values only — not validated physical estimates',
+            foreground='#b00020', font=('TkDefaultFont', 12, 'bold'))
+        components_heading.pack(anchor='nw', fill='x', pady=(0, 8))
+        components_label = ttk.Label(
+            components_tab, text='\n'.join(component_lines), justify='left',
+            wraplength=870)
+        components_label.pack(anchor='nw', fill='x')
+
+        identifiability_lines = [
+            'A converged optimizer is not proof of separate physical motions.',
+            'BIC helps compare models but is not a physical-resolution test.',
+            '',
+        ]
+        for candidate in comparison.candidates:
+            state = 'RESOLVED' if candidate.identifiable else 'NOT RESOLVED'
+            identifiability_lines.append(
+                f'{candidate.component_count}-component candidate: {state}')
+            if candidate.identifiability_warnings:
+                identifiability_lines.extend(
+                    f'  • {warning}'
+                    for warning in candidate.identifiability_warnings)
+            else:
+                identifiability_lines.append('  No resolution flags.')
+        identifiability_heading = ttk.Label(
+            identifiability_tab,
+            text=(
+                'No resolved rotational-component model'
+                if not selected.identifiable
+                else 'Selected model passed the reported checks'),
+            foreground=('#b00020' if not selected.identifiable else '#2468a2'),
+            font=('TkDefaultFont', 12, 'bold'))
+        identifiability_heading.pack(anchor='nw', fill='x', pady=(0, 8))
+        identifiability_label = ttk.Label(
+            identifiability_tab, text='\n'.join(identifiability_lines),
+            justify='left', wraplength=870)
+        identifiability_label.pack(anchor='nw', fill='x')
+
+        details.details_notebook = notebook
+        details.details_figure = figure
+        details.details_canvas = canvas
+        details.components_heading = components_heading
+        details.components_text = components_label
+        details.identifiability_heading = identifiability_heading
+        details.identifiability_text = identifiability_label
+        return details
 
     def _show_scale_diagnostic(self):
         if self.result is None:
@@ -325,7 +612,21 @@ class AnisotropyTool(tk.Toplevel):
             'timing shift, and separate fitted backgrounds. Previous laser pulses '
             'are included. An effective late-window scale is not a calibrated '
             'physical G.\n\n'
-            'The reported r(0) is the resolved time-zero anisotropy. It is not '
+            'Advanced 1/2/3-component fit:\n'
+            'Compares models with one, two, or three ordered correlation times. '
+            'Component weights are non-negative and sum to one. The raw parallel '
+            'and perpendicular counts, separate IRFs, fixed fluorescence lifetime, '
+            'shared G, exposures, periodic excitation, timing shift, and backgrounds '
+            'are handled as in the preferred global fit. The reported model is the '
+            'simplest candidate within 2 BIC units of the minimum. BIC alone does '
+            'not prove distinct physical motions. No advanced candidate is labelled '
+            'physically resolved until uncertainty and robustness validation are '
+            'available. Numerical component values remain in Fit details only. '
+            'Three-component values remain exploratory.\n\n'
+            'G defaults to 1 as an uncalibrated assumption. For a better G guess, '
+            'first use the effective late-window scale feature. That estimate is '
+            'effective, not calibrated.\n\n'
+            'The fitted r(0) is a time-zero model parameter. It is not '
             'automatically the fundamental anisotropy because very fast motion '
             'may be hidden by the IRF.\n\n'
             'Reference: Lakowicz, Principles of Fluorescence Spectroscopy, '
@@ -340,18 +641,18 @@ class AnisotropyTool(tk.Toplevel):
         if parallel.resolve() == perpendicular.resolve():
             raise ValueError('Parallel and perpendicular files must be different')
         analysis_mode = self.analysis_mode.get()
-        if analysis_mode not in {'direct', 'global'}:
+        if analysis_mode not in {'direct', 'global', 'advanced'}:
             raise ValueError('Choose a valid analysis method')
         parallel_irf = Path(self.parallel_irf_path.get()).expanduser()
         perpendicular_irf = Path(self.perpendicular_irf_path.get()).expanduser()
-        if analysis_mode == 'global':
+        if analysis_mode in {'global', 'advanced'}:
             if not parallel_irf.is_file() or not perpendicular_irf.is_file():
                 raise ValueError(
-                    'Preferred global fitting requires parallel and perpendicular IRF files')
+                    'Global fitting requires parallel and perpendicular IRF files')
             if parallel_irf.resolve() == perpendicular_irf.resolve():
                 raise ValueError('Choose a separate IRF file for each polarization')
         fixed_lifetime_ns = self.fixed_lifetime_ns.get()
-        if (analysis_mode == 'global'
+        if (analysis_mode in {'global', 'advanced'}
                 and (not np.isfinite(fixed_lifetime_ns)
                      or fixed_lifetime_ns <= 0)):
             raise ValueError(
@@ -404,14 +705,68 @@ class AnisotropyTool(tk.Toplevel):
                 or not np.isfinite(min_map_photons)
                 or min_map_photons < 0):
             raise ValueError('Photon thresholds must be finite and non-negative')
+        max_components = self.max_components.get()
+        multistart = self.multistart.get()
+        if max_components not in {1, 2, 3}:
+            raise ValueError('Maximum components must be 1, 2, or 3')
+        if not 1 <= multistart <= 32:
+            raise ValueError('Deterministic starts must be between 1 and at most 32')
+        range_mode = self.component_range_mode.get()
+        if range_mode not in {'Auto', 'Manual'}:
+            raise ValueError('Choose Auto or Manual component time ranges')
+        advanced_fit_modes = {
+            'Compare K1-Kmax (BIC)': 'bic_comparison',
+            'Fixed K expert': 'fixed_k',
+        }
+        advanced_fit_mode = advanced_fit_modes.get(self.advanced_fit_mode.get())
+        if advanced_fit_mode is None:
+            raise ValueError('Choose model comparison or Fixed K expert mode')
+        fixed_component_count = None
+        component_bounds_ns = None
+        if analysis_mode == 'advanced' and advanced_fit_mode == 'fixed_k':
+            fixed_component_count = max_components
+            bounds = []
+            for index in range(fixed_component_count):
+                lower = self.component_lower_ns[index].get()
+                upper = self.component_upper_ns[index].get()
+                if (not np.isfinite(lower) or not np.isfinite(upper)
+                        or lower <= 0 or lower >= upper):
+                    raise ValueError(
+                        f'Exp {index + 1} range must contain positive '
+                        'increasing bounds')
+                bounds.append((float(lower), float(upper)))
+            if any(bounds[index][1] > bounds[index + 1][0]
+                   for index in range(len(bounds) - 1)):
+                raise ValueError(
+                    'Fixed-K component ranges must be ordered and non-overlapping')
+            component_bounds_ns = tuple(bounds)
+            range_mode_value = 'per-component'
+        elif analysis_mode == 'advanced' and range_mode == 'Manual':
+            lower = self.shared_component_lower_ns.get()
+            upper = self.shared_component_upper_ns.get()
+            if (not np.isfinite(lower) or not np.isfinite(upper)
+                    or lower <= 0 or lower >= upper):
+                raise ValueError(
+                    'Manual shared time range must contain positive increasing '
+                    'bounds')
+            component_bounds_ns = (float(lower), float(upper))
+            range_mode_value = 'manual'
+        else:
+            range_mode_value = range_mode.lower()
+        fit_mode = analysis_mode in {'global', 'advanced'}
         return {
             'parallel_path': parallel,
             'perpendicular_path': perpendicular,
             'analysis_mode': analysis_mode,
-            'parallel_irf_path': parallel_irf if analysis_mode == 'global' else None,
-            'perpendicular_irf_path': (
-                perpendicular_irf if analysis_mode == 'global' else None),
+            'parallel_irf_path': parallel_irf if fit_mode else None,
+            'perpendicular_irf_path': perpendicular_irf if fit_mode else None,
             'fixed_lifetime_ns': fixed_lifetime_ns,
+            'max_components': max_components,
+            'fixed_component_count': fixed_component_count,
+            'advanced_fit_mode': advanced_fit_mode,
+            'multistart': multistart,
+            'component_range_mode': range_mode_value,
+            'component_bounds_ns': component_bounds_ns,
             'g_factor': g_factor,
             'g_mode': g_mode,
             'late_window_start_ns': late_window_start_ns,
@@ -429,12 +784,20 @@ class AnisotropyTool(tk.Toplevel):
             'auto_register': self.auto_register.get(),
         }
 
+    def _clear_result_actions(self):
+        self.result = None
+        self.scale_diagnostic_button.configure(state='disabled')
+        self.fit_details_button.configure(state='disabled')
+        self.save_npz_button.configure(state='disabled')
+        self.save_csv_button.configure(state='disabled')
+
     def _start_analysis(self):
         try:
             settings = self._settings()
         except Exception as exc:
             messagebox.showerror('Invalid settings', str(exc), parent=self)
             return
+        self._clear_result_actions()
         self.calculate_button.configure(state='disabled')
         self.status.set('Reading and analysing PTUs...')
         self._result_queue = queue.Queue()
@@ -475,6 +838,7 @@ class AnisotropyTool(tk.Toplevel):
         self.destroy()
 
     def _analysis_failed(self, exc):
+        self._clear_result_actions()
         self.calculate_button.configure(state='normal')
         self.status.set('Analysis failed.')
         messagebox.showerror('Anisotropy error', str(exc), parent=self)
@@ -487,25 +851,56 @@ class AnisotropyTool(tk.Toplevel):
             'normal' if getattr(result, 'late_window_stability', None) is not None
             else 'disabled')
         self.scale_diagnostic_button.configure(state=diagnostic_state)
+        details_state = (
+            'normal' if (
+                getattr(result, 'multicomponent_fit', None) is not None
+                and result.multicomponent_fit.selected_fit is not None)
+            else 'disabled')
+        self.fit_details_button.configure(state=details_state)
         self.save_npz_button.configure(state='normal')
         self.save_csv_button.configure(state='normal')
         shift_y, shift_x = result.perpendicular_shift
-        status = (
-            f'Done. Perpendicular shift: ({shift_y:.2f}, {shift_x:.2f}) px')
+        status = f'Done. Shift: ({shift_y:.2f}, {shift_x:.2f}) px.'
         metadata = getattr(result, 'metadata', {})
         scale_source = metadata.get('shared_scale_source')
         applied_scale = getattr(result, 'g_factor', None)
         if scale_source == 'assumed' and applied_scale is not None:
             if np.isclose(applied_scale, 1.0):
-                status += ' — WARNING: G=1 is assumed, not calibrated.'
+                status += ' WARNING: G=1 is assumed, not calibrated.'
             else:
-                status += f' — Uncalibrated assumed scale: {applied_scale:.4g}.'
+                status += f' Assumed scale {applied_scale:.4g}; not calibrated.'
         elif scale_source == 'late_window' and applied_scale is not None:
             status += (
-                f' — Effective late-window scale: {applied_scale:.4g}; '
+                f' Effective scale {applied_scale:.4g}; '
                 'not calibrated physical G.')
         elif scale_source == 'calibrated' and applied_scale is not None:
-            status += f' — User-declared calibrated G: {applied_scale:.4g}.'
+            status += f' User-declared calibrated G {applied_scale:.4g}.'
+        comparison = getattr(result, 'multicomponent_fit', None)
+        if comparison is not None:
+            if comparison.selected_fit is None:
+                if (getattr(
+                        comparison, 'selection_mode', 'bic_comparison')
+                        == 'fixed_k'):
+                    status += (
+                        f' Fixed K{comparison.max_components} expert fit; '
+                        'no cross-K BIC selection. No optimizer candidate '
+                        'converged. NOT RESOLVED.')
+                else:
+                    status += ' No optimizer candidate converged. NOT RESOLVED.'
+            else:
+                if (getattr(
+                        comparison, 'selection_mode', 'bic_comparison')
+                        == 'fixed_k'):
+                    status += (
+                        f' Fixed K{comparison.selected_component_count} expert fit; '
+                        'no cross-K BIC selection.')
+                else:
+                    status += (
+                        f' BIC-selected '
+                        f'{comparison.selected_component_count}-component model.')
+            if (comparison.selected_fit is not None
+                    and not comparison.selected_fit.identifiable):
+                status += ' WARNING: NOT RESOLVED; open Fit details.'
         self.status.set(status)
         self._set_inputs_visible(False)
         self._draw_result()
@@ -516,6 +911,10 @@ class AnisotropyTool(tk.Toplevel):
             self._colorbar = None
         for axis in self.axes.flat:
             axis.clear()
+        if getattr(self.result, 'multicomponent_fit', None) is not None:
+            self._draw_multicomponent_fit()
+            self.canvas.draw_idle()
+            return
         if getattr(self.result, 'polarized_fit', None) is not None:
             self._draw_global_fit()
             self.canvas.draw_idle()
@@ -561,6 +960,151 @@ class AnisotropyTool(tk.Toplevel):
             extend='both', location='left')
         self._style_plot_text()
         self.canvas.draw_idle()
+
+    def _draw_multicomponent_fit(self):
+        self.figure.set_layout_engine(None)
+        self.figure.subplots_adjust(
+            left=0.10, right=0.95, bottom=0.17, top=0.93,
+            wspace=0.32, hspace=0.75)
+        comparison = self.result.multicomponent_fit
+        fit = comparison.selected_fit
+        if fit is None:
+            self.figure.set_layout_engine('constrained')
+            for axis in self.axes.flat:
+                axis.set_axis_off()
+            if (getattr(
+                    comparison, 'selection_mode', 'bic_comparison')
+                    == 'fixed_k'):
+                failure_text = (
+                    f'Fixed K{comparison.max_components} expert fit\n'
+                    'No cross-K BIC selection\n'
+                    'No optimizer candidate converged\nNOT RESOLVED')
+            else:
+                failure_text = (
+                    'No optimizer candidate converged\nNOT RESOLVED')
+            self.axes[0, 0].text(
+                0.5, 0.5, failure_text,
+                ha='center', va='center', color='#b00020', fontsize=14,
+                transform=self.axes[0, 0].transAxes)
+            self._style_plot_text()
+            return
+        fit_bins = len(fit.parallel_model)
+        time_relative = (
+            self.result.time_ns[:fit_bins] - self.result.time_ns[self.peak_bin])
+        parallel_observed = (
+            self.result.parallel_decay[:fit_bins] + self.result.parallel_background)
+        perpendicular_observed = (
+            self.result.perpendicular_decay[:fit_bins]
+            + self.result.perpendicular_background)
+        channels = (
+            (self.axes[0, 0], parallel_observed, fit.parallel_model,
+             'Parallel advanced fit'),
+            (self.axes[0, 1], perpendicular_observed, fit.perpendicular_model,
+             'Perpendicular advanced fit'),
+        )
+        for axis, observed, model, title in channels:
+            axis.semilogy(
+                time_relative, np.maximum(observed, 1e-3),
+                color='#777777', linewidth=1.2, label='Measured')
+            axis.semilogy(
+                time_relative, np.maximum(model, 1e-3),
+                color='#2468a2', linewidth=2.0, label='Selected model')
+            axis.set_title(title, fontsize=11)
+            axis.set_xlabel('Time after peak (ns)', fontsize=9)
+            axis.set_ylabel('Photon counts', fontsize=9)
+            axis.tick_params(labelsize=8)
+            axis.legend(
+                fontsize=8, loc='upper right', bbox_to_anchor=(0.95, 0.98))
+
+        self.axes[1, 0].plot(
+            time_relative, fit.parallel_residual,
+            color='#2468a2', linewidth=1.2, label='Parallel')
+        self.axes[1, 0].plot(
+            time_relative, fit.perpendicular_residual,
+            color='#a34a28', linewidth=1.2, label='Perpendicular')
+        self.axes[1, 0].axhline(0.0, color='#777777', linewidth=0.8)
+        self.axes[1, 0].set_title('Residuals', fontsize=11)
+        self.axes[1, 0].set_xlabel('Time after peak (ns)', fontsize=9)
+        self.axes[1, 0].set_ylabel('Signed Poisson deviance', fontsize=9)
+        self.axes[1, 0].tick_params(labelsize=8)
+        self.axes[1, 0].legend(fontsize=8)
+
+        fixed_k = getattr(
+            comparison, 'selection_mode', 'bic_comparison') == 'fixed_k'
+        if fixed_k:
+            summary_lines = [
+                'Advanced fixed-K expert fit',
+                f'Fixed fluorescence lifetime: {fit.intensity_lifetime_ns:.4g} ns',
+                f'Fixed K{comparison.selected_component_count} expert fit',
+                'No cross-K BIC selection',
+            ]
+        else:
+            summary_lines = [
+                'Advanced anisotropy model comparison',
+                f'Fixed fluorescence lifetime: {fit.intensity_lifetime_ns:.4g} ns',
+                (f'BIC-selected model: {comparison.selected_component_count} '
+                 'components'),
+            ]
+        for candidate in comparison.candidates:
+            state = 'resolved' if candidate.identifiable else 'not resolved'
+            prefix = (
+                f'K{candidate.component_count} numerical diagnostics'
+                if fixed_k else f'{candidate.component_count}-component')
+            summary_lines.append(
+                f'{prefix}: BIC {candidate.bic:.4g} ({state})')
+        if fit.identifiable:
+            summary_lines.append(
+                f'Time-zero anisotropy r(0): {fit.initial_anisotropy:.4g}')
+            for index, (correlation_time, weight) in enumerate(zip(
+                    fit.rotational_correlation_times_ns,
+                    fit.component_weights), start=1):
+                summary_lines.append(
+                    f'Component {index}: {correlation_time:.4g} ns, '
+                    f'weight {weight:.4g}')
+            summary_lines.append('Physical resolution passed validated checks')
+        else:
+            summary_lines.append('No resolved rotational-component model')
+            summary_lines.append('NOT RESOLVED — do not assign physical labels')
+            for warning in fit.identifiability_warnings:
+                summary_lines.append(f'WARNING: {warning}')
+        summary_lines.append(f'Poisson deviance: {fit.poisson_deviance:.4g}')
+        deviance_per_dof = getattr(
+            fit, 'deviance_per_degree_of_freedom', None)
+        if deviance_per_dof is not None:
+            summary_lines.append(
+                f'Deviance / degree of freedom: {deviance_per_dof:.4g}')
+        summary_lines.extend([
+            f'AICc: {fit.aicc:.4g}; BIC: {fit.bic:.4g}',
+            f'Common IRF shift: {fit.common_irf_shift_bins:.4g} bins',
+        ])
+        scale_source = self.result.metadata.get(
+            'shared_scale_source', 'assumed')
+        if scale_source == 'late_window':
+            summary_lines.extend([
+                f'Effective late-window scale: {self.result.g_factor:.4g}',
+                'WARNING: effective scale is not calibrated physical G',
+            ])
+        elif scale_source == 'calibrated':
+            summary_lines.append(
+                f'User-declared calibrated G: {self.result.g_factor:.4g}')
+        elif np.isclose(self.result.g_factor, 1.0):
+            summary_lines.append('WARNING: G=1 is assumed, not calibrated')
+        else:
+            summary_lines.extend([
+                f'Uncalibrated assumed G: {self.result.g_factor:.4g}',
+                'WARNING: assumed G is not calibrated',
+            ])
+        summary_lines.append(
+            'Extra components are exploratory, not proof of distinct motions')
+        summary = '\n'.join(summary_lines)
+        summary_fontsize = 7.0 if len(summary_lines) <= 17 else 6.8
+        self.axes[1, 1].set_position([0.60, 0.01, 0.37, 0.55])
+        self.axes[1, 1].text(
+            0.05, 0.95, summary, ha='left', va='top',
+            fontsize=summary_fontsize,
+            transform=self.axes[1, 1].transAxes)
+        self.axes[1, 1].set_axis_off()
+        self._style_plot_text()
 
     def _draw_global_fit(self):
         self.figure.set_layout_engine(None)
@@ -709,6 +1253,14 @@ class AnisotropyTool(tk.Toplevel):
                 'applied_shared_scale', self.result.g_factor),
             'late_window_selected_start_ns': metadata.get(
                 'late_window_selected_start_ns', ''),
+            'analysis_mode': metadata.get('analysis_mode', ''),
+            'parallel_irf_file': metadata.get('parallel_irf_file', ''),
+            'perpendicular_irf_file': metadata.get(
+                'perpendicular_irf_file', ''),
+            'repetition_period_ns': metadata.get('repetition_period_ns', ''),
+            'global_fit_bins': metadata.get('global_fit_bins', ''),
+            'advanced_component_range_mode': metadata.get(
+                'advanced_component_range_mode', ''),
             'perpendicular_shift_y': shift_y,
             'perpendicular_shift_x': shift_x,
             'spatial_window': self.result.spatial_window,
@@ -719,6 +1271,78 @@ class AnisotropyTool(tk.Toplevel):
             'anisotropy', 'valid',
         ]
         fit = getattr(self.result, 'polarized_fit', None)
+        comparison = getattr(self.result, 'multicomponent_fit', None)
+        if comparison is not None:
+            fit = comparison.selected_fit
+            provenance.update({
+                'advanced_max_components': comparison.max_components,
+                'advanced_selected_component_count': (
+                    comparison.selected_component_count),
+                'advanced_selection_mode': comparison.selection_mode,
+                'advanced_cross_k_bic_selection': _uses_cross_k_bic(
+                    comparison.selection_mode, comparison.max_components),
+                'advanced_residual_type': 'signed_poisson_deviance',
+            })
+            for candidate in comparison.candidates:
+                prefix = f'advanced_candidate_{candidate.component_count}'
+                provenance.update({
+                    f'{prefix}_times_ns': ';'.join(
+                        f'{value:g}' for value in
+                        candidate.rotational_correlation_times_ns),
+                    f'{prefix}_weights': ';'.join(
+                        f'{value:g}' for value in candidate.component_weights),
+                    f'{prefix}_intensity_lifetime_ns': getattr(
+                        candidate, 'intensity_lifetime_ns', ''),
+                    f'{prefix}_initial_anisotropy': (
+                        candidate.initial_anisotropy),
+                    f'{prefix}_amplitude': candidate.amplitude,
+                    f'{prefix}_poisson_deviance': candidate.poisson_deviance,
+                    f'{prefix}_degrees_of_freedom': getattr(
+                        candidate, 'degrees_of_freedom', ''),
+                    f'{prefix}_deviance_per_degree_of_freedom': getattr(
+                        candidate, 'deviance_per_degree_of_freedom', ''),
+                    f'{prefix}_bic': candidate.bic,
+                    f'{prefix}_aicc': candidate.aicc,
+                    f'{prefix}_success': candidate.success,
+                    f'{prefix}_eligible_for_selection': getattr(
+                        candidate, 'eligible_for_selection', candidate.success),
+                    f'{prefix}_message': candidate.message,
+                    f'{prefix}_parameters_at_bounds': ';'.join(
+                        candidate.parameters_at_bounds),
+                    f'{prefix}_identifiable': candidate.identifiable,
+                    f'{prefix}_warnings': ' | '.join(
+                        candidate.identifiability_warnings),
+                    f'{prefix}_component_bounds_ns': ';'.join(
+                        f'{lower:g}:{upper:g}' for lower, upper in
+                        candidate.component_bounds_ns),
+                    f'{prefix}_common_irf_shift_bins': (
+                        candidate.common_irf_shift_bins),
+                    f'{prefix}_parallel_background': (
+                        candidate.parallel_background),
+                    f'{prefix}_perpendicular_background': (
+                        candidate.perpendicular_background),
+                    f'{prefix}_multistart_count': candidate.multistart_count,
+                    f'{prefix}_parameter_names': ';'.join(getattr(
+                        candidate, 'parameter_names', ())),
+                })
+                for record in candidate.multistart_records:
+                    start_prefix = f'{prefix}_start_{record.start_index}'
+                    provenance.update({
+                        f'{start_prefix}_parameter_vector': ';'.join(
+                            f'{value:g}' for value in record.parameter_vector),
+                        f'{start_prefix}_times_ns': ';'.join(
+                            f'{value:g}' for value in
+                            record.rotational_correlation_times_ns),
+                        f'{start_prefix}_weights': ';'.join(
+                            f'{value:g}' for value in
+                            record.component_weights),
+                        f'{start_prefix}_poisson_deviance': (
+                            record.poisson_deviance),
+                        f'{start_prefix}_success': record.success,
+                        f'{start_prefix}_message': record.message,
+                        f'{start_prefix}_parameters_at_bounds': ';'.join(
+                            record.parameters_at_bounds),
+                    })
         stability = getattr(self.result, 'late_window_stability', None)
         late_fields = []
         if stability is not None:
@@ -742,13 +1366,15 @@ class AnisotropyTool(tk.Toplevel):
             ]
             provenance.update({
                 'intensity_lifetime_ns': fit.intensity_lifetime_ns,
-                'rotational_correlation_ns': fit.rotational_correlation_ns,
                 'initial_anisotropy': fit.initial_anisotropy,
                 'common_irf_shift_bins': fit.common_irf_shift_bins,
                 'parallel_fit_background': fit.parallel_background,
                 'perpendicular_fit_background': fit.perpendicular_background,
                 'poisson_deviance': fit.poisson_deviance,
             })
+            if comparison is None:
+                provenance['rotational_correlation_ns'] = (
+                    fit.rotational_correlation_ns)
         fieldnames.extend([*fit_fields, *late_fields, *provenance])
         peak_time = self.result.time_ns[self.peak_bin]
         with open(path, 'w', newline='') as handle:
@@ -780,7 +1406,7 @@ class AnisotropyTool(tk.Toplevel):
                         'late_window_nested_standard_error': (
                             stability.nested_standard_error[index]),
                     }
-                writer.writerow({
+                row = {
                     'time_ns': time_ns,
                     'time_after_peak_ns': time_ns - peak_time,
                     'parallel': parallel,
@@ -790,7 +1416,10 @@ class AnisotropyTool(tk.Toplevel):
                     **fit_values,
                     **late_values,
                     **provenance,
-                })
+                }
+                writer.writerow({
+                    key: _spreadsheet_safe(value)
+                    for key, value in row.items()})
         self.status.set(f'Saved {Path(path).name}')
 
 
@@ -836,10 +1465,15 @@ def load_irf_curve(path, n_bins, tcspc_res, expected_period_ns=None,
 
 
 def run_analysis(settings):
-    from .anisotropy import (
-        analyze_anisotropy, calculate_late_window_stability,
-        estimate_translation, fit_polarized_decays)
     from flimkit.formats.PTU.reader import PTUFile
+
+    from .anisotropy import (
+        analyze_anisotropy,
+        calculate_late_window_stability,
+        estimate_translation,
+        fit_multicomponent_polarized_decays,
+        fit_polarized_decays,
+    )
 
     with PTUFile(settings['parallel_path'], verbose=False) as parallel_file:
         parallel = parallel_file.pixel_stack(
@@ -892,7 +1526,8 @@ def run_analysis(settings):
                 repetition_period_ns = float(numeric_periods[0])
                 period_bins = candidate_bins
 
-    period_required = analysis_mode == 'global' or scale_source == 'late_window'
+    fit_required = analysis_mode in {'global', 'advanced'}
+    period_required = fit_required or scale_source == 'late_window'
     if period_required and period_error is not None:
         if ('missing' in period_error
                 or 'finite and positive' in period_error):
@@ -901,10 +1536,11 @@ def run_analysis(settings):
                     'Effective late-window scale requires a laser period')
             raise ValueError('Preferred global fitting requires a laser period')
         raise ValueError(period_error)
-    if analysis_mode == 'global':
+    if fit_required:
         if tcspc_res is None or not np.isfinite(tcspc_res) or tcspc_res <= 0:
-            raise ValueError('Preferred global fitting requires TCSPC resolution')
-        assert period_bins is not None
+            raise ValueError('Global fitting requires TCSPC resolution')
+        if period_bins is None:
+            raise ValueError('Global fitting requires a valid laser period')
         global_fit_bins = period_bins
 
     late_window_stability = None
@@ -926,7 +1562,8 @@ def run_analysis(settings):
             diagnostic_error = str(exc)
     requested_scale = float(settings['g_factor'])
     if scale_source == 'late_window':
-        assert late_window_stability is not None
+        if late_window_stability is None:
+            raise RuntimeError('Late-window scale diagnostic was not calculated')
         applied_scale = late_window_stability.selected_scale
     else:
         applied_scale = requested_scale
@@ -960,9 +1597,9 @@ def run_analysis(settings):
         perpendicular_exposure=settings['perpendicular_exposure'])
     result.g_factor = applied_scale
     result.late_window_stability = late_window_stability
-    if analysis_mode == 'global':
-        assert global_fit_bins is not None
-        assert repetition_period_ns is not None
+    if fit_required:
+        if global_fit_bins is None or repetition_period_ns is None:
+            raise ValueError('Global fitting requires a valid laser period')
         fit_time_ns = time_ns[:global_fit_bins]
         parallel_irf = load_irf_curve(
             settings['parallel_irf_path'], global_fit_bins, tcspc_res,
@@ -972,18 +1609,31 @@ def run_analysis(settings):
             settings['perpendicular_irf_path'], global_fit_bins, tcspc_res,
             expected_period_ns=repetition_period_ns,
             ptu_channel=settings['perpendicular_channel'])
-        result.polarized_fit = fit_polarized_decays(
+        fit_arguments = (
             parallel.sum(axis=(0, 1))[:global_fit_bins],
             perpendicular.sum(axis=(0, 1))[:global_fit_bins],
-            fit_time_ns, parallel_irf=parallel_irf,
-            perpendicular_irf=perpendicular_irf,
-            intensity_lifetime_ns=settings['fixed_lifetime_ns'],
-            g_factor=applied_scale,
-            parallel_exposure=settings['parallel_exposure'],
-            perpendicular_exposure=settings['perpendicular_exposure'],
-            initial_parallel_background=result.parallel_background,
-            initial_perpendicular_background=result.perpendicular_background,
-            repetition_period_ns=repetition_period_ns)
+            fit_time_ns)
+        fit_keywords = {
+            'parallel_irf': parallel_irf,
+            'perpendicular_irf': perpendicular_irf,
+            'intensity_lifetime_ns': settings['fixed_lifetime_ns'],
+            'g_factor': applied_scale,
+            'parallel_exposure': settings['parallel_exposure'],
+            'perpendicular_exposure': settings['perpendicular_exposure'],
+            'initial_parallel_background': result.parallel_background,
+            'initial_perpendicular_background': result.perpendicular_background,
+            'repetition_period_ns': repetition_period_ns,
+        }
+        if analysis_mode == 'global':
+            result.polarized_fit = fit_polarized_decays(
+                *fit_arguments, **fit_keywords)
+        else:
+            result.multicomponent_fit = fit_multicomponent_polarized_decays(
+                *fit_arguments, **fit_keywords,
+                max_components=settings.get('max_components', 1),
+                fixed_component_count=settings.get('fixed_component_count'),
+                multistart=settings.get('multistart', 6),
+                component_bounds_ns=settings.get('component_bounds_ns'))
     result.metadata.update({
         'parallel_file': Path(settings['parallel_path']).name,
         'perpendicular_file': Path(settings['perpendicular_path']).name,
@@ -1023,7 +1673,7 @@ def run_analysis(settings):
                 late_window_stability.nested_standard_error[
                     late_window_stability.selected_start_bin]),
         })
-    if analysis_mode == 'global':
+    if fit_required:
         result.metadata.update({
             'parallel_irf_file': Path(settings['parallel_irf_path']).name,
             'perpendicular_irf_file': Path(
@@ -1031,10 +1681,47 @@ def run_analysis(settings):
             'repetition_period_ns': repetition_period_ns,
             'global_fit_bins': global_fit_bins,
             'fixed_lifetime_ns': settings['fixed_lifetime_ns'],
-            'global_fit_model': (
-                'fixed single fluorescence lifetime; '
-                'single rotational correlation'),
             'global_fit_reference': 'Lakowicz, Chapter 11, Section 11.2.2',
+        })
+    if analysis_mode == 'global':
+        result.metadata['global_fit_model'] = (
+            'fixed single fluorescence lifetime; '
+            'single rotational correlation')
+    elif analysis_mode == 'advanced':
+        comparison = result.multicomponent_fit
+        if comparison is None:
+            raise RuntimeError(
+                'advanced analysis did not produce a multicomponent fit')
+        advanced_fit_mode = comparison.selection_mode
+        fixed_k = advanced_fit_mode == 'fixed_k'
+        actual_fixed_component_count = (
+            comparison.max_components if fixed_k else None)
+        actual_component_range_mode = (
+            'per-component' if fixed_k
+            else ('manual' if settings.get('component_bounds_ns') is not None
+                  else 'auto'))
+        candidates = getattr(comparison, 'candidates', ())
+        if candidates:
+            candidate_bounds = np.asarray(
+                candidates[0].component_bounds_ns, dtype=float)
+            actual_component_bounds = (
+                candidate_bounds.tolist() if fixed_k
+                else candidate_bounds[0].tolist())
+        else:
+            actual_component_bounds = (
+                settings.get('component_bounds_ns') or [])
+        model_description = _advanced_model_description(
+            advanced_fit_mode, comparison.max_components)
+        result.metadata.update({
+            'global_fit_model': model_description,
+            'advanced_fit_mode': advanced_fit_mode,
+            'advanced_cross_k_bic_selection': _uses_cross_k_bic(
+                advanced_fit_mode, comparison.max_components),
+            'advanced_fixed_component_count': actual_fixed_component_count,
+            'advanced_max_components': comparison.max_components,
+            'advanced_multistart': settings.get('multistart', 6),
+            'advanced_component_range_mode': actual_component_range_mode,
+            'advanced_component_bounds_ns': actual_component_bounds,
         })
     return result, peak_bin
 

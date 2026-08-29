@@ -173,6 +173,108 @@ def test_success_status_warns_for_uncalibrated_g_one():
         root.destroy()
 
 
+def test_success_status_marks_unresolved_advanced_fit():
+    from types import SimpleNamespace
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        selected = SimpleNamespace(
+            identifiable=False,
+            identifiability_warnings=('component time reached a bound',))
+        result = SimpleNamespace(
+            perpendicular_shift=(0.0, 0.0), g_factor=1.0,
+            late_window_stability=None,
+            multicomponent_fit=SimpleNamespace(
+                selected_component_count=2, selected_fit=selected,
+                selection_mode='fixed_k'),
+            metadata={'shared_scale_source': 'assumed'})
+
+        with patch.object(dialog, '_draw_result'):
+            dialog._analysis_finished(result, 0)
+
+        assert 'Fixed K2 expert fit' in dialog.status.get()
+        assert 'no cross-K BIC selection' in dialog.status.get()
+        assert 'BIC-selected' not in dialog.status.get()
+        assert 'NOT RESOLVED' in dialog.status.get()
+        assert 'disabled' not in dialog.fit_details_button.state()
+    finally:
+        root.destroy()
+
+
+def test_all_failed_advanced_candidates_show_fail_closed_result():
+    from types import SimpleNamespace
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        comparison = SimpleNamespace(
+            max_components=2, selected_component_count=0,
+            selected_fit=None, candidates=(), selection_mode='fixed_k')
+        result = SimpleNamespace(
+            multicomponent_fit=comparison, polarized_fit=None,
+            late_window_stability=None, perpendicular_shift=(0.0, 0.0),
+            metadata={'shared_scale_source': 'assumed'}, g_factor=1.0)
+
+        dialog._analysis_finished(result, 0)
+
+        assert 'No optimizer candidate converged' in dialog.status.get()
+        assert 'Fixed K2 expert fit' in dialog.status.get()
+        assert 'no cross-K BIC selection' in dialog.status.get()
+        assert 'NOT RESOLVED' in dialog.status.get()
+        assert 'disabled' in dialog.fit_details_button.state()
+        main_text = dialog.axes[0, 0].texts[0].get_text()
+        assert 'Fixed K2 expert fit' in main_text
+        assert 'No cross-K BIC selection' in main_text
+        assert 'No optimizer candidate converged' in main_text
+    finally:
+        root.destroy()
+
+
+def test_replacement_run_clears_stale_result_actions_on_start_and_failure():
+    from unittest.mock import MagicMock, patch
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    dialog = None
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.result = object()
+        for button in (
+                dialog.scale_diagnostic_button, dialog.fit_details_button,
+                dialog.save_npz_button, dialog.save_csv_button):
+            button.configure(state='normal')
+        thread = MagicMock()
+        with (patch.object(dialog, '_settings', return_value={}),
+              patch('flimkit_anisotropy.tool.threading.Thread',
+                    return_value=thread),
+              patch.object(dialog, 'after', return_value='poll-id')):
+            dialog._start_analysis()
+
+        assert dialog.result is None
+        assert 'disabled' in dialog.calculate_button.state()
+        for button in (
+                dialog.scale_diagnostic_button, dialog.fit_details_button,
+                dialog.save_npz_button, dialog.save_csv_button):
+            assert 'disabled' in button.state()
+        thread.start.assert_called_once_with()
+
+        with patch('flimkit_anisotropy.tool.messagebox.showerror'):
+            dialog._analysis_failed(RuntimeError('replacement failed'))
+        assert dialog.result is None
+        assert 'disabled' not in dialog.calculate_button.state()
+        for button in (
+                dialog.scale_diagnostic_button, dialog.fit_details_button,
+                dialog.save_npz_button, dialog.save_csv_button):
+            assert 'disabled' in button.state()
+    finally:
+        if dialog is not None:
+            dialog._poll_after_id = None
+        root.destroy()
+
+
 def test_load_irf_curve_reads_ptu_histogram_and_pads_trailing_bins(tmp_path):
     import numpy as np
     from flimkit_anisotropy.tool import load_irf_curve
@@ -504,6 +606,202 @@ def test_anisotropy_dialog_offers_direct_and_preferred_modes():
         root.destroy()
 
 
+def test_advanced_multicomponent_controls_default_safely_and_hint_at_scale_estimator():
+    import tkinter as tk
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        labels = []
+        stack = [dialog]
+        while stack:
+            widget = stack.pop()
+            stack.extend(widget.winfo_children())
+            try:
+                labels.append(widget.cget('text'))
+            except tk.TclError:
+                pass
+
+        assert dialog.g_factor.get() == 1.0
+        assert dialog.max_components.get() == 1
+        assert dialog.component_range_mode.get() == 'Auto'
+        assert 'Advanced 1/2/3-component fit' in labels
+        hint = next(text for text in labels if 'better G' in str(text))
+        assert 'late-window' in hint
+        assert 'not calibrated' in hint
+    finally:
+        root.destroy()
+
+
+def test_shared_comparison_bounds_are_independent_of_fixed_k_exp_one():
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        assert dialog.shared_component_lower_ns.get() == 0.2
+        assert dialog.shared_component_upper_ns.get() == 6.0
+        assert dialog.component_lower_ns[0].get() == 0.2
+        assert dialog.component_upper_ns[0].get() == 1.0
+
+        dialog.shared_component_lower_ns.set(0.3)
+        dialog.shared_component_upper_ns.set(5.0)
+        assert dialog.component_lower_ns[0].get() == 0.2
+        assert dialog.component_upper_ns[0].get() == 1.0
+
+        dialog.component_lower_ns[0].set(0.4)
+        dialog.component_upper_ns[0].set(0.9)
+        assert dialog.shared_component_lower_ns.get() == 0.3
+        assert dialog.shared_component_upper_ns.get() == 5.0
+    finally:
+        root.destroy()
+
+
+def test_fixed_k_expert_mode_enables_only_selected_component_bounds():
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.analysis_mode.set('advanced')
+        dialog.advanced_fit_mode.set('Fixed K expert')
+        dialog.max_components.set(2)
+        root.update_idletasks()
+
+        assert all('disabled' not in entry.state()
+                   for pair in dialog.per_component_bound_entries[:2]
+                   for entry in pair)
+        assert all('disabled' in entry.state()
+                   for entry in dialog.per_component_bound_entries[2])
+        assert all('disabled' in entry.state()
+                   for entry in dialog.component_bound_entries)
+        assert 'No cross-K BIC' in dialog.advanced_mode_hint.get()
+    finally:
+        root.destroy()
+
+
+def test_automatic_component_ranges_disable_manual_range_fields():
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.analysis_mode.set('advanced')
+        root.update_idletasks()
+        assert all('disabled' in entry.state()
+                   for entry in dialog.component_bound_entries)
+
+        dialog.component_range_mode.set('Manual')
+        root.update_idletasks()
+        assert all('disabled' not in entry.state()
+                   for entry in dialog.component_bound_entries)
+    finally:
+        root.destroy()
+
+
+def test_advanced_multicomponent_settings_include_user_g_and_model_controls(tmp_path):
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    paths = [tmp_path / name for name in (
+        'parallel.ptu', 'perpendicular.ptu', 'parallel_irf.ptu',
+        'perpendicular_irf.ptu')]
+    for path in paths:
+        path.touch()
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.parallel_path.set(paths[0])
+        dialog.perpendicular_path.set(paths[1])
+        dialog.parallel_irf_path.set(paths[2])
+        dialog.perpendicular_irf_path.set(paths[3])
+        dialog.analysis_mode.set('advanced')
+        dialog.max_components.set(3)
+        dialog.multistart.set(7)
+        dialog.g_factor.set(2.75)
+
+        settings = dialog._settings()
+
+        assert settings['analysis_mode'] == 'advanced'
+        assert settings['max_components'] == 3
+        assert settings['multistart'] == 7
+        assert settings['g_factor'] == 2.75
+        assert settings['component_bounds_ns'] is None
+
+        dialog.multistart.set(33)
+        with pytest.raises(ValueError, match='at most 32'):
+            dialog._settings()
+    finally:
+        root.destroy()
+
+
+def test_fixed_k_expert_settings_return_one_range_per_component(tmp_path):
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    paths = [tmp_path / name for name in (
+        'parallel.ptu', 'perpendicular.ptu', 'parallel_irf.ptu',
+        'perpendicular_irf.ptu')]
+    for path in paths:
+        path.touch()
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.parallel_path.set(paths[0])
+        dialog.perpendicular_path.set(paths[1])
+        dialog.parallel_irf_path.set(paths[2])
+        dialog.perpendicular_irf_path.set(paths[3])
+        dialog.analysis_mode.set('advanced')
+        dialog.advanced_fit_mode.set('Fixed K expert')
+        dialog.max_components.set(2)
+        dialog.component_lower_ns[0].set(0.2)
+        dialog.component_upper_ns[0].set(1.0)
+        dialog.component_lower_ns[1].set(1.5)
+        dialog.component_upper_ns[1].set(8.0)
+
+        settings = dialog._settings()
+
+        assert settings['advanced_fit_mode'] == 'fixed_k'
+        assert settings['fixed_component_count'] == 2
+        assert settings['component_range_mode'] == 'per-component'
+        assert settings['component_bounds_ns'] == ((0.2, 1.0), (1.5, 8.0))
+
+        dialog.component_lower_ns[1].set(0.8)
+        with pytest.raises(ValueError, match='ordered and non-overlapping'):
+            dialog._settings()
+    finally:
+        root.destroy()
+
+
+def test_advanced_manual_shared_range_is_positive_and_increasing(tmp_path):
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    paths = [tmp_path / name for name in (
+        'parallel.ptu', 'perpendicular.ptu', 'parallel_irf.ptu',
+        'perpendicular_irf.ptu')]
+    for path in paths:
+        path.touch()
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        dialog.parallel_path.set(paths[0])
+        dialog.perpendicular_path.set(paths[1])
+        dialog.parallel_irf_path.set(paths[2])
+        dialog.perpendicular_irf_path.set(paths[3])
+        dialog.analysis_mode.set('advanced')
+        dialog.max_components.set(3)
+        dialog.component_range_mode.set('Manual')
+        dialog.shared_component_lower_ns.set(0.2)
+        dialog.shared_component_upper_ns.set(6.0)
+
+        assert dialog._settings()['component_bounds_ns'] == (0.2, 6.0)
+
+        dialog.shared_component_lower_ns.set(7.0)
+        with pytest.raises(ValueError, match='positive increasing'):
+            dialog._settings()
+    finally:
+        root.destroy()
+
+
 def test_method_info_states_global_fit_requirements():
     from flimkit_anisotropy.tool import show_anisotropy_tool
 
@@ -517,9 +815,13 @@ def test_method_info_states_global_fit_requirements():
         assert 'separate IRFs' in message
         assert 'PTU' in message
         assert 'separate fitted backgrounds' in message
-        assert 'resolved time-zero anisotropy' in message
+        assert 'time-zero model parameter' in message
         assert 'assumed, calibrated, or effective late-window scale' in message
         assert 'not a calibrated physical G' in message
+        assert 'Advanced 1/2/3-component fit' in message
+        assert 'ordered correlation times' in message
+        assert 'BIC' in message
+        assert 'No advanced candidate is labelled' in message
     finally:
         root.destroy()
 
@@ -815,6 +1117,121 @@ def test_global_fit_mode_draws_polarized_models_and_residuals():
         root.destroy()
 
 
+def test_advanced_fit_draws_selected_model_and_fail_closed_warnings():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        candidate_two = SimpleNamespace(
+            component_count=2, bic=90.0, identifiable=False,
+            identifiability_warnings=(
+                'fastest component is below the IRF resolution',
+                'slowest component reached the observation bound'),
+            rotational_correlation_times_ns=np.array([0.2, 6.4]),
+            component_weights=np.array([0.3, 0.7]),
+            parallel_model=np.array([11.0, 8.0, 5.0]),
+            perpendicular_model=np.array([7.0, 6.0, 4.0]),
+            parallel_residual=np.array([0.0, 1.0, -1.0]),
+            perpendicular_residual=np.array([1.0, 0.0, -1.0]),
+            intensity_lifetime_ns=3.2, initial_anisotropy=0.09,
+            poisson_deviance=80.0, aicc=100.0, success=True,
+            message='converged', parameters_at_bounds=(),
+            common_irf_shift_bins=0.7, parallel_background=2.5,
+            perpendicular_background=7.0)
+        advanced_fit = SimpleNamespace(
+            selected_component_count=2,
+            selected_fit=candidate_two,
+            candidates=(candidate_two,), selection_mode='fixed_k')
+        dialog.result = SimpleNamespace(
+            parallel_decay=np.array([9.0, 7.0, 3.0, 1.0]),
+            perpendicular_decay=np.array([5.0, 4.0, 2.0, 1.0]),
+            parallel_background=2.0, perpendicular_background=2.0,
+            polarized_fit=None, multicomponent_fit=advanced_fit,
+            time_ns=np.arange(4, dtype=float), g_factor=1.0,
+            metadata={'shared_scale_source': 'assumed'})
+        dialog.peak_bin = 1
+
+        dialog._draw_result()
+
+        assert dialog.axes[0, 0].get_title() == 'Parallel advanced fit'
+        assert dialog.axes[0, 1].get_title() == 'Perpendicular advanced fit'
+        assert dialog.axes[1, 0].get_ylabel() == 'Signed Poisson deviance'
+        summary = dialog.axes[1, 1].texts[0].get_text()
+        assert 'Fixed K2 expert fit' in summary
+        assert 'No cross-K BIC selection' in summary
+        assert 'BIC-selected' not in summary
+        assert 'NOT RESOLVED' in summary
+        assert 'No resolved rotational-component model' in summary
+        assert '0.2 ns' not in summary
+        assert 'weight 0.3' not in summary
+        assert 'Resolved r(0)' not in summary
+        assert 'below the IRF resolution' in summary
+        assert 'observation bound' in summary
+        assert 'G=1 is assumed' in summary
+    finally:
+        root.destroy()
+
+
+def test_advanced_details_window_has_fit_component_and_identifiability_tabs():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import show_anisotropy_tool
+
+    root = _tk_root_or_skip()
+    try:
+        dialog = show_anisotropy_tool(root)
+        selected = SimpleNamespace(
+            component_count=2, bic=90.0, aicc=85.0,
+            rotational_correlation_times_ns=np.array([0.2, 6.4]),
+            component_weights=np.array([0.3, 0.7]),
+            component_bounds_ns=np.array([[0.19, 0.8], [1.0, 6.4]]),
+            parallel_model=np.array([9.0, 6.0]),
+            perpendicular_model=np.array([4.0, 3.0]),
+            parallel_residual=np.array([1.0, 0.0]),
+            perpendicular_residual=np.array([0.0, 1.0]),
+            identifiable=False,
+            identifiability_warnings=(
+                'fastest component is below the IRF resolution',),
+            success=True)
+        comparison = SimpleNamespace(
+            selected_component_count=2, selected_fit=selected,
+            candidates=(selected,), selection_mode='fixed_k')
+        dialog.result = SimpleNamespace(
+            multicomponent_fit=comparison,
+            time_ns=np.array([0.0, 1.0]),
+            parallel_decay=np.array([8.0, 5.0]),
+            perpendicular_decay=np.array([3.0, 2.0]),
+            parallel_background=2.0, perpendicular_background=3.0)
+        dialog.peak_bin = 0
+
+        details = dialog._show_advanced_details()
+
+        assert details is not None
+        tabs = [details.details_notebook.tab(tab, 'text')
+                for tab in details.details_notebook.tabs()]
+        assert tabs == ['Fit curves', 'Components', 'Identifiability']
+        assert '0.2 ns' in details.components_text.cget('text')
+        assert 'weight 0.3' in details.components_text.cget('text')
+        assert 'Fixed K2 expert fit' in details.components_text.cget('text')
+        assert 'No cross-K BIC selection' in details.components_text.cget('text')
+        assert 'bounds 0.19–0.8 ns' in details.components_text.cget('text')
+        assert 'bounds 1–6.4 ns' in details.components_text.cget('text')
+        assert 'BIC-selected' not in details.components_text.cget('text')
+        assert 'Optimizer values only' in details.components_heading.cget('text')
+        warning_text = details.identifiability_text.cget('text')
+        assert 'NOT RESOLVED' in warning_text
+        assert 'below the IRF resolution' in warning_text
+        assert 'No resolved rotational-component model' in (
+            details.identifiability_heading.cget('text'))
+        assert str(details.identifiability_heading.cget('foreground')) == '#b00020'
+        details.destroy()
+    finally:
+        root.destroy()
+
+
 def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     from types import SimpleNamespace
     import numpy as np
@@ -905,6 +1322,129 @@ def test_run_analysis_preferred_mode_fits_both_decays_with_separate_irfs():
     assert result.metadata['repetition_period_ns'] == 1.51
     assert result.metadata['global_fit_bins'] == 15
     assert result.metadata['fixed_lifetime_ns'] == 3.0
+
+
+def test_advanced_model_description_uses_actual_candidate_range():
+    from flimkit_anisotropy.tool import (
+        _advanced_model_description, _uses_cross_k_bic)
+
+    assert 'K1 rotational-correlation model; no cross-K BIC selection' in (
+        _advanced_model_description('bic_comparison', 1))
+    assert 'K1-K2 rotational-correlation models' in (
+        _advanced_model_description('bic_comparison', 2))
+    assert 'K1-K3 rotational-correlation models' in (
+        _advanced_model_description('bic_comparison', 3))
+    assert 'fixed-K expert' in _advanced_model_description('fixed_k', 2)
+    assert not _uses_cross_k_bic('bic_comparison', 1)
+    assert _uses_cross_k_bic('bic_comparison', 2)
+    assert not _uses_cross_k_bic('fixed_k', 2)
+
+
+def test_run_analysis_advanced_mode_passes_g_and_component_controls():
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import run_analysis
+
+    stack = np.ones((2, 2, 16), dtype=float)
+
+    class FakePTUFile:
+        def __init__(self, path, verbose=False):
+            self.time_ns = np.arange(16, dtype=float) * 0.1
+            self.tcspc_res = 0.1e-9
+            self.period_ns = 1.51
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            pass
+
+        def pixel_stack(self, channel):
+            return stack
+
+    fixed_fit = SimpleNamespace(
+        selection_mode='fixed_k', selected_component_count=2,
+        max_components=2)
+    comparison_fit = SimpleNamespace(
+        selection_mode='bic_comparison', selected_component_count=1,
+        max_components=2)
+    expected_fixed = SimpleNamespace(
+        metadata={}, parallel_background=2.0,
+        perpendicular_background=3.0, polarized_fit=None,
+        multicomponent_fit=None)
+    expected_comparison = SimpleNamespace(
+        metadata={}, parallel_background=2.0,
+        perpendicular_background=3.0, polarized_fit=None,
+        multicomponent_fit=None)
+    settings = {
+        'parallel_path': 'parallel.ptu',
+        'perpendicular_path': 'perpendicular.ptu',
+        'parallel_irf_path': 'parallel.csv',
+        'perpendicular_irf_path': 'perpendicular.csv',
+        'analysis_mode': 'advanced',
+        'fixed_lifetime_ns': 3.0,
+        'max_components': 2,
+        'fixed_component_count': 2,
+        'advanced_fit_mode': 'bic_comparison',
+        'multistart': 7,
+        'component_range_mode': 'per-component',
+        'component_bounds_ns': ((0.2, 0.8), (1.0, 5.0)),
+        'parallel_channel': 0,
+        'perpendicular_channel': 0,
+        'analysis_start_ns': 0.0,
+        'analysis_stop_ns': 1.0,
+        'auto_register': False,
+        'background_bins': slice(0, 2),
+        'g_factor': 2.75,
+        'g_mode': 'assumed',
+        'late_window_start_ns': 0.0,
+        'spatial_window': 1,
+        'stride': 1,
+        'min_bin_photons': 0.0,
+        'min_map_photons': 0.0,
+        'parallel_exposure': 1.0,
+        'perpendicular_exposure': 1.0,
+    }
+    irf = np.eye(1, 15, 2).ravel()
+
+    with (patch('flimkit.formats.PTU.reader.PTUFile', FakePTUFile),
+          patch('flimkit_anisotropy.anisotropy.analyze_anisotropy',
+                side_effect=[expected_fixed, expected_comparison]),
+          patch('flimkit_anisotropy.tool.load_irf_curve',
+                side_effect=[irf, irf, irf, irf]),
+          patch(
+              'flimkit_anisotropy.anisotropy.fit_multicomponent_polarized_decays',
+              side_effect=[fixed_fit, comparison_fit]) as fit):
+        fixed_result, _ = run_analysis(settings)
+        settings.update({
+            'fixed_component_count': None,
+            'advanced_fit_mode': 'fixed_k',
+            'component_range_mode': 'manual',
+            'component_bounds_ns': (0.2, 5.0),
+        })
+        comparison_result, _ = run_analysis(settings)
+
+    first_call, second_call = fit.call_args_list
+    assert fixed_result.multicomponent_fit is fixed_fit
+    assert fixed_result.polarized_fit is None
+    assert first_call.kwargs['g_factor'] == 2.75
+    assert first_call.kwargs['max_components'] == 2
+    assert first_call.kwargs['fixed_component_count'] == 2
+    assert first_call.kwargs['multistart'] == 7
+    assert first_call.kwargs['component_bounds_ns'] == (
+        (0.2, 0.8), (1.0, 5.0))
+    assert fixed_result.metadata['analysis_mode'] == 'advanced'
+    assert fixed_result.metadata['advanced_max_components'] == 2
+    assert fixed_result.metadata['advanced_fit_mode'] == 'fixed_k'
+    assert fixed_result.metadata['advanced_fixed_component_count'] == 2
+    assert 'fixed-K expert' in fixed_result.metadata['global_fit_model']
+
+    assert comparison_result.multicomponent_fit is comparison_fit
+    assert second_call.kwargs['fixed_component_count'] is None
+    assert comparison_result.metadata['advanced_fit_mode'] == 'bic_comparison'
+    assert comparison_result.metadata['advanced_fixed_component_count'] is None
+    assert 'K1-K2 rotational-correlation models' in (
+        comparison_result.metadata['global_fit_model'])
 
 
 def test_run_analysis_applies_one_shared_late_window_scale():
@@ -1251,6 +1791,114 @@ def test_global_fit_csv_includes_models_residuals_and_parameters(tmp_path):
     assert rows[0]['perpendicular_fit_background'] == '7.0'
     assert rows[1]['parallel_model'] == ''
     assert rows[1]['parallel_observed'] == ''
+
+
+def test_advanced_fit_csv_includes_selection_components_and_warnings(tmp_path):
+    import csv
+    from types import SimpleNamespace
+    import numpy as np
+    from flimkit_anisotropy.tool import AnisotropyTool
+
+    start_record = SimpleNamespace(
+        start_index=0, parameter_vector=np.arange(8, dtype=float),
+        rotational_correlation_times_ns=np.array([0.2, 6.4]),
+        component_weights=np.array([0.3, 0.7]), poisson_deviance=60.0,
+        success=True, message='@SUM(1,1)',
+        parameters_at_bounds=('common_irf_shift_bins',))
+    candidate_one = SimpleNamespace(
+        component_count=1, rotational_correlation_times_ns=np.array([1.5]),
+        component_weights=np.array([1.0]), bic=120.0, aicc=115.0,
+        poisson_deviance=100.0, identifiable=False,
+        identifiability_warnings=('uncertainty validation unavailable',),
+        success=True, component_bounds_ns=np.array([[0.2, 6.4]]),
+        multistart_count=1, multistart_records=(), message='candidate converged',
+        parameters_at_bounds=(), common_irf_shift_bins=0.1,
+        parallel_background=2.0, perpendicular_background=3.0,
+        initial_anisotropy=0.2, amplitude=100.0)
+    candidate_two = SimpleNamespace(
+        component_count=2,
+        rotational_correlation_times_ns=np.array([0.2, 6.4]),
+        component_weights=np.array([0.3, 0.7]), bic=90.0, aicc=85.0,
+        poisson_deviance=60.0, identifiable=False,
+        identifiability_warnings=(
+            'fastest component is below the IRF resolution',), success=True,
+        component_bounds_ns=np.array([[0.2, 6.4], [0.2, 6.4]]),
+        parallel_model=np.array([9.0]),
+        perpendicular_model=np.array([4.0]),
+        parallel_residual=np.array([1.0]),
+        perpendicular_residual=np.array([0.0]),
+        intensity_lifetime_ns=3.2, initial_anisotropy=0.09,
+        common_irf_shift_bins=0.7, parallel_background=2.5,
+        perpendicular_background=7.0, message='+candidate converged',
+        amplitude=123.0,
+        parameters_at_bounds=('common_irf_shift_bins',), multistart_count=1,
+        multistart_records=(start_record,),
+        parameter_names=('time_1', 'time_2', 'weight_1', 'r0',
+                         'log_amplitude', 'shift', 'parallel_bg',
+                         'perpendicular_bg'))
+    comparison = SimpleNamespace(
+        max_components=2, selected_component_count=2,
+        selected_fit=candidate_two, candidates=(candidate_one, candidate_two),
+        selection_mode='bic_comparison')
+    tool = AnisotropyTool.__new__(AnisotropyTool)
+    tool.peak_bin = 0
+    tool.status = SimpleNamespace(set=lambda value: None)
+    tool.result = SimpleNamespace(
+        time_ns=np.array([1.0, 2.0]),
+        parallel_decay=np.array([8.0, 3.0]),
+        perpendicular_decay=np.array([3.0, 1.0]),
+        parallel_background=2.0, perpendicular_background=3.0,
+        anisotropy_decay=np.array([0.2, 0.2]), polarized_fit=None,
+        multicomponent_fit=comparison, late_window_stability=None,
+        g_factor=1.0, parallel_exposure=1.0,
+        perpendicular_exposure=1.0, perpendicular_shift=(0.0, 0.0),
+        spatial_window=1, stride=1,
+        metadata={
+            'analysis_mode': 'advanced',
+            'advanced_component_range_mode': 'auto',
+            'parallel_file': '=HYPERLINK("https://example.invalid")',
+            'parallel_irf_file': '=parallel_irf.ptu',
+            'perpendicular_irf_file': 'perpendicular_irf.ptu',
+            'repetition_period_ns': 12.8,
+            'global_fit_bins': 132})
+    path = tmp_path / 'advanced.csv'
+
+    with patch('flimkit_anisotropy.tool.filedialog.asksaveasfilename',
+               return_value=str(path)):
+        tool._save_csv()
+
+    with path.open(newline='') as handle:
+        rows = list(csv.DictReader(handle))
+    first = rows[0]
+    assert first['parallel_model'] == '9.0'
+    assert first['advanced_selected_component_count'] == '2'
+    assert first['advanced_selection_mode'] == 'bic_comparison'
+    assert first['advanced_cross_k_bic_selection'] == 'True'
+    assert first['advanced_candidate_1_times_ns'] == '1.5'
+    assert first['advanced_candidate_2_times_ns'] == '0.2;6.4'
+    assert first['advanced_candidate_2_weights'] == '0.3;0.7'
+    assert first['advanced_candidate_2_bic'] == '90.0'
+    assert first['advanced_candidate_2_identifiable'] == 'False'
+    assert first['advanced_residual_type'] == 'signed_poisson_deviance'
+    assert first['parallel_file'].startswith("'=")
+    assert first['parallel_irf_file'] == "'=parallel_irf.ptu"
+    assert first['perpendicular_irf_file'] == 'perpendicular_irf.ptu'
+    assert first['repetition_period_ns'] == '12.8'
+    assert first['global_fit_bins'] == '132'
+    assert first['advanced_candidate_2_message'] == "'+candidate converged"
+    assert first['advanced_candidate_2_initial_anisotropy'] == '0.09'
+    assert first['advanced_candidate_2_amplitude'] == '123.0'
+    assert first['advanced_candidate_2_parameter_names'].startswith(
+        'time_1;time_2;weight_1;r0')
+    assert first['advanced_candidate_2_common_irf_shift_bins'] == '0.7'
+    assert first['advanced_candidate_2_parallel_background'] == '2.5'
+    assert first['advanced_candidate_2_start_0_parameter_vector'] == (
+        '0;1;2;3;4;5;6;7')
+    assert first['advanced_candidate_2_start_0_times_ns'] == '0.2;6.4'
+    assert first['advanced_candidate_2_start_0_weights'] == '0.3;0.7'
+    assert first['advanced_candidate_2_start_0_message'] == "'@SUM(1,1)"
+    assert 'below the IRF resolution' in first[
+        'advanced_candidate_2_warnings']
 
 
 def test_csv_export_includes_relative_time_and_provenance(tmp_path):
