@@ -47,6 +47,24 @@ Two advanced fit modes are available:
 
 CSV and NPZ exports record the selection mode, whether cross-K BIC selection was performed, every component's bounds, every start's latent parameters, physical times and weights, deviance, convergence state, message, and bound hits, plus IRF filenames and fit provenance. The bounded softmax uses finite latent limits, so weights approach zero but do not become exactly zero.
 
+### Fixed-K expert fit showcase
+
+Choose K1, K2, or K3, then enter one lower/upper rotational-correlation-time range for each active component. Fixed-K mode fits only that K and clearly reports that no cross-K BIC selection was performed.
+
+#### Fixed K2
+
+![Fixed K2 expert inputs](docs/assets/fixed-k2-expert-inputs.png)
+
+![Fixed K2 fail-closed result](docs/assets/fixed-k2-expert-result.png)
+
+#### Fixed K3
+
+![Fixed K3 expert inputs](docs/assets/fixed-k3-expert-inputs.png)
+
+![Fixed K3 fail-closed result](docs/assets/fixed-k3-expert-result.png)
+
+The example fits above use real paired PTU data. They remain labelled **NOT RESOLVED** because numerical optimization and information criteria do not establish physically identifiable rotational components.
+
 No advanced candidate is labelled physically resolved in this release. Profile likelihoods or equivalent two-sided uncertainty checks, bound perturbations, and broader replicate validation are not yet implemented. The main result therefore reports BIC and numerical adequacy warnings without showing component times or weights. Numerical optimizer values are available only in **Fit details...**, labelled as optimizer values rather than physical estimates. Additional warnings flag Poisson deviance per degree of freedom above 2, fitted bounds, weights below 0.05, adjacent times separated by less than 1.5-fold, IRF/window limits, multistart disagreement, and preference for a simpler model. The deviance threshold is a conservative screen, not a calibrated goodness-of-fit test. Three-component values remain exploratory.
 
 The fits remain deliberately constrained. An effective or assumed scale is not calibration, fitted r(0) is a time-zero model parameter and may not equal the fundamental anisotropy, and a bound-hit result is rejected rather than accepted. Multiple fluorescence lifetimes, per-pixel rotational fitting, and calibrated confidence intervals are not implemented. Rotational correlation times have not yet been validated against a known standard.
